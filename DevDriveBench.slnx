@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DevDriveBench.Cli/DevDriveBench.Cli.csproj" />
+    <Project Path="src/DevDriveBench.Engine/DevDriveBench.Engine.csproj" />
+    <Project Path="src/DevDriveBench/DevDriveBench.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DevDriveBench.Engine.Tests/DevDriveBench.Engine.Tests.csproj" />
+  </Folder>
+</Solution>

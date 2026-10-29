@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "DevDriveBench (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "DevDriveBench (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

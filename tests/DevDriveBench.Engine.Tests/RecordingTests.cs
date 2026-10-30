@@ -83,6 +83,9 @@ public class RecordingTests : IDisposable
 
         // Machine CPU contains a comma and must be quoted.
         Assert.Contains("\"Test CPU, 8 cores\"", lines[1]);
+
+        // Tool provenance closes every row, so an emulated toolchain is visible in the data.
+        Assert.EndsWith(",git,2.56.0,x64,arm64", lines[1].TrimEnd('\r'));
     }
 
     [Fact]

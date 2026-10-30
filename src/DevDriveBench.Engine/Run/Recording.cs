@@ -114,7 +114,7 @@ public static class RecordingStore
         ArgumentNullException.ThrowIfNull(recording);
         RunInfo info = recording.Info;
         var sb = new StringBuilder();
-        sb.AppendLine("run_started,machine,cpu,os,profile,iterations,test_id,test,unit,better,drive_role,drive,file_system,dev_drive,virtual_disk,iteration,value,discarded,reported_value,advantage");
+        sb.AppendLine("run_started,machine,cpu,os,profile,iterations,test_id,test,unit,better,drive_role,drive,file_system,dev_drive,virtual_disk,iteration,value,discarded,reported_value,advantage,tool,tool_version,tool_arch,os_arch");
 
         var byId = recording.Results.ToDictionary(r => r.TestId, StringComparer.OrdinalIgnoreCase);
         foreach (TestDescriptor test in info.Tests)
@@ -153,6 +153,10 @@ public static class RecordingStore
                         BenchStats.IsDiscarded(i, runs.Count) ? "true" : "false",
                         reported?.ToString("0.######", CultureInfo.InvariantCulture) ?? string.Empty,
                         result.Advantage?.ToString("0.####", CultureInfo.InvariantCulture) ?? string.Empty,
+                        test.RequiredTool ?? string.Empty,
+                        test.ToolVersion ?? string.Empty,
+                        test.ToolArchitecture ?? string.Empty,
+                        info.Machine.OsArchitecture,
                     });
                     sb.AppendLine();
                 }

@@ -10,13 +10,15 @@ using Microsoft.UI.Dispatching;
 
 namespace DevDriveBench.ViewModels;
 
-/// <summary>A selectable test group in the plan flyout.</summary>
+/// <summary>A selectable test group in the plan flyout, with a winget install for its tools.</summary>
 public sealed partial class TestToggle : ObservableObject
 {
-    public TestToggle(string group, string name, bool available, string? note)
+    public TestToggle(string group, string name, bool available, string? note, IReadOnlyList<WingetPackage> packages, Func<TestToggle, Task> install)
     {
         Group = group;
         Name = name;
+        Packages = packages;
+        InstallCommand = new AsyncRelayCommand(() => install(this), () => CanInstall);
         IsAvailable = available;
         Note = note ?? string.Empty;
         IsSelected = available;
@@ -26,12 +28,45 @@ public sealed partial class TestToggle : ObservableObject
 
     public string Name { get; }
 
-    public bool IsAvailable { get; }
+    public IReadOnlyList<WingetPackage> Packages { get; }
 
-    public string Note { get; }
+    public IAsyncRelayCommand InstallCommand { get; }
+
+    /// <summary>What the Install button will run, for its tooltip.</summary>
+    public string InstallTooltip => Packages.Count == 0
+        ? string.Empty
+        : "winget install " + string.Join(" + ", Packages.Select(p => p.Id));
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanInstall))]
+    public partial bool IsAvailable { get; set; }
+
+    [ObservableProperty]
+    public partial string Note { get; set; }
 
     [ObservableProperty]
     public partial bool IsSelected { get; set; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanInstall))]
+    public partial bool IsInstalling { get; set; }
+
+    /// <summary>Latest installer status line (empty when idle).</summary>
+    [ObservableProperty]
+    public partial string InstallStatus { get; set; } = string.Empty;
+
+    /// <summary>True when the tool is missing, winget can fetch it, and no install is running.</summary>
+    public bool CanInstall => !IsAvailable && !IsInstalling && Packages.Count > 0;
+
+    public bool HasInstallStatus => InstallStatus.Length > 0;
+
+    public string InstallButtonName => $"Install {Name} tools";
+
+    partial void OnInstallStatusChanged(string value) => OnPropertyChanged(nameof(HasInstallStatus));
+
+    partial void OnIsAvailableChanged(bool value) => InstallCommand.NotifyCanExecuteChanged();
+
+    partial void OnIsInstallingChanged(bool value) => InstallCommand.NotifyCanExecuteChanged();
 }
 
 /// <summary>One recording in the Replay picker.</summary>
@@ -74,6 +109,7 @@ public sealed partial class MainViewModel : ObservableObject
     private CancellationTokenSource? _cts;
     private bool _isLiveSession;
     private bool _revertingMode;
+    private bool _wingetAvailable;
 
     public MainViewModel(DispatcherQueue dispatcher)
     {
@@ -113,6 +149,11 @@ public sealed partial class MainViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(CanRun))]
     public partial bool IsReady { get; set; }
 
+    /// <summary>True while any winget install runs (Run waits, so installers never overlap a measurement).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRun))]
+    public partial bool IsInstalling { get; set; }
+
     /// <summary>Iterations per drive per test; default 1 (fast). With ≥ 2 the first is discarded.</summary>
     [ObservableProperty]
     public partial double Iterations { get; set; } = 1;
@@ -144,7 +185,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     public bool HasDevDrive => DevDrive is not null;
 
-    public bool CanRun => IsRunning || (IsReady && (IsReplayMode ? SelectedRecording is not null : DevDrive is not null && SystemDrive is not null));
+    public bool CanRun => IsRunning || (IsReady && !IsInstalling && (IsReplayMode ? SelectedRecording is not null : DevDrive is not null && SystemDrive is not null));
 
     public string RunLabel => IsRunning ? "Stop" : "Run";
 
@@ -184,9 +225,11 @@ public sealed partial class MainViewModel : ObservableObject
         IReadOnlyList<DriveDescriptor> drives = Array.Empty<DriveDescriptor>();
         await Task.Run(() =>
         {
+            EnvironmentRefresher.RefreshPath();
             drives = DriveProbe.GetFixedDrives();
             _described = _runner.DescribeTests(WorkloadProfile.Thorough);
             _machine = MachineProbe.Capture();
+            _wingetAvailable = WingetInstaller.IsAvailable;
         });
 
         // Counter initialization takes seconds once per process; pay it now, not at the first Run.
@@ -209,9 +252,15 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             bool available = rows.All(r => r.Available);
-            string? note = available ? GroupNote(group, rows[0]) : rows[0].UnavailableReason;
-            var toggle = new TestToggle(group, TestCatalog.GroupName(group), available, note);
-            toggle.PropertyChanged += (_, _) => { if (!IsRunning && !IsShowingReplay) { ShowPreview(); } };
+            IReadOnlyList<WingetPackage> packages = _wingetAvailable ? InstallCatalog.For(group) : Array.Empty<WingetPackage>();
+            var toggle = new TestToggle(group, TestCatalog.GroupName(group), available, GroupNote(group, rows[0]), packages, InstallAsync);
+            toggle.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(TestToggle.IsSelected) && !IsRunning && !IsShowingReplay)
+                {
+                    ShowPreview();
+                }
+            };
             Tests.Add(toggle);
         }
 
@@ -528,10 +577,73 @@ public sealed partial class MainViewModel : ObservableObject
     private static string ReplayFooter(RunInfo info) =>
         $"Replay of a recorded run · {info.StartedAt.LocalDateTime.ToString("MMM d yyyy HH:mm", CultureInfo.CurrentCulture)} · {info.Machine.Name}";
 
-    private static string? GroupNote(string group, TestDescriptor first) => group switch
+    private string? GroupNote(string group, TestDescriptor first)
     {
-        TestCatalog.DiskGroup => "seconds",
-        TestCatalog.GitClone => "offline · seconds",
-        _ => "network for first prep · minutes",
-    };
+        if (!first.Available)
+        {
+            return first.UnavailableReason;
+        }
+
+        string emulated = TestCatalog.EmulationNote(first, _machine) is string note ? note + " · " : string.Empty;
+        string tool = first.RequiredTool is string t ? $"{t} {first.ToolVersion}".Trim() + " · " + emulated : string.Empty;
+        return group switch
+        {
+            TestCatalog.DiskGroup => "seconds",
+            TestCatalog.GitClone => tool + "offline · seconds",
+            _ => tool + "network for first prep · minutes",
+        };
+    }
+
+    /// <summary>
+    /// Installs a workload's tools with winget, then re-probes every tool (PATH is refreshed by the
+    /// installer) so the workload becomes runnable without restarting the app.
+    /// </summary>
+    private async Task InstallAsync(TestToggle toggle)
+    {
+        toggle.IsInstalling = true;
+        IsInstalling = true;
+        toggle.InstallStatus = "starting winget";
+        try
+        {
+            var progress = new Progress<string>(line => toggle.InstallStatus = line);
+            InstallResult result = await new WingetInstaller().InstallAsync(toggle.Packages, progress);
+
+            toggle.InstallStatus = "checking";
+            _described = await Task.Run(() =>
+            {
+                EnvironmentRefresher.RefreshPath();
+                return _runner.DescribeTests(WorkloadProfile.Thorough);
+            });
+
+            foreach (TestToggle t in Tests)
+            {
+                TestDescriptor[] rows = _described.Where(d => d.Group == t.Group).ToArray();
+                bool available = rows.Length > 0 && rows.All(r => r.Available);
+                bool becameAvailable = available && !t.IsAvailable;
+                t.IsAvailable = available;
+                t.Note = rows.Length > 0 ? GroupNote(t.Group, rows[0]) ?? string.Empty : t.Note;
+                if (becameAvailable)
+                {
+                    t.IsSelected = true;
+                }
+            }
+
+            toggle.InstallStatus = result.Succeeded
+                ? (toggle.IsAvailable ? "installed · ready" : "installed · not on PATH yet, restart the app")
+                : "failed · " + result.Message;
+        }
+        catch (Exception ex)
+        {
+            toggle.InstallStatus = "failed · " + ex.Message;
+        }
+        finally
+        {
+            toggle.IsInstalling = false;
+            IsInstalling = Tests.Any(t => t.IsInstalling);
+            if (!IsRunning && !IsShowingReplay)
+            {
+                ShowPreview();
+            }
+        }
+    }
 }

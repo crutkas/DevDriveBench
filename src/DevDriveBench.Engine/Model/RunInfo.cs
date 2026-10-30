@@ -60,6 +60,9 @@ public sealed record MachineInfo
     public int LogicalCores { get; init; }
 
     public long MemoryBytes { get; init; }
+
+    /// <summary>Native OS architecture: <c>arm64</c>, <c>x64</c>, or <c>x86</c> (true even if this app runs emulated).</summary>
+    public string OsArchitecture { get; init; } = string.Empty;
 }
 
 /// <summary>One result row: what it measures, its unit and direction, and whether it can run here.</summary>
@@ -93,6 +96,12 @@ public sealed record TestDescriptor
 
     /// <summary>Detected tool version, when found.</summary>
     public string? ToolVersion { get; init; }
+
+    /// <summary>The executable that really runs the workload (not a shim/proxy), when known.</summary>
+    public string? ToolBinary { get; init; }
+
+    /// <summary>PE machine type of <see cref="ToolBinary"/>: <c>arm64</c>, <c>x64</c>, or <c>x86</c>.</summary>
+    public string? ToolArchitecture { get; init; }
 
     /// <summary>False when the test cannot run on this machine (e.g. tool not installed).</summary>
     public bool Available { get; init; } = true;

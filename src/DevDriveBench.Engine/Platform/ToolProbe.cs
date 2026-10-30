@@ -5,8 +5,12 @@ using Microsoft.Win32;
 
 namespace DevDriveBench.Engine.Platform;
 
-/// <summary>An installed developer tool, resolved on PATH.</summary>
-public sealed record ToolInfo(string Name, bool Found, string? Version, string? Path);
+/// <summary>
+/// An installed developer tool, resolved on PATH. <see cref="Binary"/> is the executable that actually
+/// does the work (not a shim or proxy) and <see cref="Architecture"/> its PE machine type
+/// (<c>arm64</c>, <c>x64</c>, <c>x86</c>), so an emulated tool on an ARM64 machine is visible.
+/// </summary>
+public sealed record ToolInfo(string Name, bool Found, string? Version, string? Path, string? Binary = null, string? Architecture = null);
 
 /// <summary>Detects whether a workload's tool is installed (read-only: PATH lookup + version probe).</summary>
 public interface IToolProbe
@@ -14,7 +18,7 @@ public interface IToolProbe
     ToolInfo Detect(string tool);
 }
 
-/// <summary>Real <see cref="IToolProbe"/>: PATH + PATHEXT resolution and a <c>--version</c> probe.</summary>
+/// <summary>Real <see cref="IToolProbe"/>: PATH + PATHEXT resolution, a <c>--version</c> probe, and the real binary's architecture.</summary>
 public sealed class ToolProbe : IToolProbe
 {
     private readonly IWorkloadProcessRunner _runner;
@@ -36,8 +40,111 @@ public sealed class ToolProbe : IToolProbe
             : _runner.Run(new WorkloadProcessRequest(path, "--version", TimeoutMs: 15_000));
 
         string? version = result.ExitCode == 0 ? ParseVersion(result.StandardOutput + "\n" + result.StandardError) : null;
-        return new ToolInfo(tool, true, version, path);
+        if (result.ExitCode != 0)
+        {
+            // On PATH but can't run (e.g. a rustup proxy with no toolchain): not usable for a workload.
+            return new ToolInfo(tool, false, null, path);
+        }
+
+        string? binary = RealBinary(tool, path);
+        return new ToolInfo(tool, true, version, path, binary, binary is null ? null : PeArchitecture(binary));
     }
+
+    /// <summary>
+    /// The executable that really runs for a tool: git's own <c>git.exe</c> in its exec-path (the
+    /// <c>cmd\git.exe</c> on PATH is a launcher), <c>node.exe</c> for the <c>npm.cmd</c> shim, the
+    /// active toolchain's <c>cargo.exe</c> (<c>.cargo\bin\cargo.exe</c> is a rustup proxy), else the
+    /// resolved path itself. Null when it can't be determined.
+    /// </summary>
+    private string? RealBinary(string tool, string resolved)
+    {
+        try
+        {
+            switch (tool.ToLowerInvariant())
+            {
+                case "git":
+                    // exec-path is <prefix>\libexec\git-core; the real git.exe is <prefix>\bin\git.exe
+                    // (older layouts also keep one in git-core).
+                    string? execPath = FirstLine(_runner.Run(new WorkloadProcessRequest(resolved, "--exec-path", TimeoutMs: 15_000)))?.Replace('/', '\\');
+                    if (execPath is not null)
+                    {
+                        string? prefix = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(execPath.TrimEnd('\\')));
+                        foreach (string candidate in new[] { System.IO.Path.Combine(execPath, "git.exe"), prefix is null ? string.Empty : System.IO.Path.Combine(prefix, "bin", "git.exe") })
+                        {
+                            if (candidate.Length > 0 && File.Exists(candidate))
+                            {
+                                return candidate;
+                            }
+                        }
+                    }
+
+                    return resolved;
+
+                case "npm":
+                    string? node = Resolve("node");
+                    return node is not null && node.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? node : null;
+
+                case "cargo":
+                    string? rustup = Resolve("rustup");
+                    string? cargo = rustup is null ? null : FirstLine(_runner.Run(new WorkloadProcessRequest(rustup, "which cargo", TimeoutMs: 15_000)));
+                    return cargo is not null && File.Exists(cargo) ? cargo : resolved;
+
+                default:
+                    return resolved.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? resolved : null;
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? FirstLine(ProcessRunResult result) =>
+        result.ExitCode != 0
+            ? null
+            : result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+
+    /// <summary>The PE machine type of an executable as <c>arm64</c>/<c>x64</c>/<c>x86</c>, or null.</summary>
+    public static string? PeArchitecture(string path)
+    {
+        try
+        {
+            using FileStream stream = File.OpenRead(path);
+            using var reader = new BinaryReader(stream);
+            if (stream.Length < 0x40 || reader.ReadUInt16() != 0x5A4D)
+            {
+                return null; // no "MZ"
+            }
+
+            stream.Position = 0x3C;
+            int peOffset = reader.ReadInt32();
+            if (peOffset <= 0 || peOffset + 6 > stream.Length)
+            {
+                return null;
+            }
+
+            stream.Position = peOffset;
+            if (reader.ReadUInt32() != 0x00004550)
+            {
+                return null; // no "PE\0\0"
+            }
+
+            return MachineName(reader.ReadUInt16());
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Names an IMAGE_FILE_MACHINE value.</summary>
+    public static string? MachineName(ushort machine) => machine switch
+    {
+        0xAA64 => "arm64",
+        0x8664 => "x64",
+        0x014C => "x86",
+        _ => null,
+    };
 
     /// <summary>First <c>MAJOR.MINOR[.PATCH]</c> token in the text, or null.</summary>
     public static string? ParseVersion(string? text)
@@ -92,6 +199,7 @@ public static class MachineProbe
         Cpu = CpuName(),
         LogicalCores = Environment.ProcessorCount,
         MemoryBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
+        OsArchitecture = InstallCatalog.WingetArchitecture(RuntimeInformation.OSArchitecture) ?? RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(),
     };
 
     /// <summary>

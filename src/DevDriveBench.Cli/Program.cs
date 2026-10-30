@@ -7,6 +7,9 @@ using DevDriveBench.Engine.Run;
 //   devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,...] [--dev D:] [--out DIR] [--list]
 
 var options = Args.Parse(args);
+
+// Pick up tools installed since this shell started (PATH is re-read from the registry).
+EnvironmentRefresher.RefreshPath();
 if (options.Help)
 {
     Console.WriteLine("devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,npm-ci,dotnet-build,cargo-build] [--dev D:] [--out DIR] [--list]");
@@ -19,6 +22,16 @@ if (options.List)
     foreach (DriveDescriptor d in drives)
     {
         Console.WriteLine($"{d.Letter,-3} {d.FileSystem,-5} {(d.IsSystem ? "system " : "")}{(d.IsDevDrive ? (d.IsTrusted ? "dev-drive(trusted) " : "dev-drive ") : "")}{d.BusType} {d.DiskModel} {d.BackingFile}");
+    }
+
+    Console.WriteLine();
+    var probe = new ToolProbe();
+    string os = MachineProbe.Capture().OsArchitecture;
+    foreach (string tool in new[] { "git", "npm", "dotnet", "cargo" })
+    {
+        ToolInfo t = probe.Detect(tool);
+        string flag = t.Architecture is string a && a != os ? $"  (emulated on {os})" : string.Empty;
+        Console.WriteLine(t.Found ? $"{tool,-7} {t.Version,-10} {t.Architecture ?? "?",-6} {t.Binary}{flag}" : $"{tool,-7} not installed");
     }
 
     return 0;

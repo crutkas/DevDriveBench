@@ -132,20 +132,54 @@
                     <FontIcon FontSize="16" Glyph="&#xE713;" />
                     <Button.Flyout>
                         <Flyout Placement="BottomEdgeAlignedRight">
-                            <StackPanel Width="320" Spacing="10">
+                            <StackPanel Width="380" Spacing="10">
                                 <TextBlock Style="{StaticResource SectionLabelStyle}" Text="TESTS" />
                                 <ItemsControl ItemsSource="{x:Bind ViewModel.Tests, Mode=OneTime}">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate x:DataType="vm:TestToggle">
-                                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}" IsEnabled="{x:Bind IsAvailable, Mode=OneTime}">
-                                                <StackPanel>
-                                                    <TextBlock Text="{x:Bind Name, Mode=OneTime}" />
-                                                    <TextBlock
-                                                        FontSize="12"
-                                                        Foreground="{ThemeResource StageTextTertiaryBrush}"
-                                                        Text="{x:Bind Note, Mode=OneTime}" />
-                                                </StackPanel>
-                                            </CheckBox>
+                                            <Grid Margin="0,0,0,6" ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                </Grid.RowDefinitions>
+                                                <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}" IsEnabled="{x:Bind IsAvailable, Mode=OneWay}">
+                                                    <StackPanel>
+                                                        <TextBlock Text="{x:Bind Name, Mode=OneTime}" />
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource StageTextTertiaryBrush}"
+                                                            Text="{x:Bind Note, Mode=OneWay}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                </CheckBox>
+                                                <Button
+                                                    Grid.Column="1"
+                                                    VerticalAlignment="Center"
+                                                    AutomationProperties.Name="{x:Bind InstallButtonName, Mode=OneTime}"
+                                                    Command="{x:Bind InstallCommand, Mode=OneTime}"
+                                                    Content="Install"
+                                                    ToolTipService.ToolTip="{x:Bind InstallTooltip, Mode=OneTime}"
+                                                    Visibility="{x:Bind CanInstall, Mode=OneWay}" />
+                                                <ProgressRing
+                                                    Grid.Column="1"
+                                                    Width="20"
+                                                    Height="20"
+                                                    IsActive="{x:Bind IsInstalling, Mode=OneWay}"
+                                                    Visibility="{x:Bind IsInstalling, Mode=OneWay}" />
+                                                <TextBlock
+                                                    Grid.Row="1"
+                                                    Grid.ColumnSpan="2"
+                                                    Margin="28,2,0,0"
+                                                    FontSize="12"
+                                                    Foreground="{ThemeResource StageTextSecondaryBrush}"
+                                                    Text="{x:Bind InstallStatus, Mode=OneWay}"
+                                                    TextTrimming="CharacterEllipsis"
+                                                    Visibility="{x:Bind HasInstallStatus, Mode=OneWay}" />
+                                            </Grid>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>

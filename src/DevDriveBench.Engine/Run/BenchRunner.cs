@@ -116,8 +116,10 @@ public sealed class BenchRunner
                 Better = Better.Lower,
                 RequiredTool = workload.RequiredTool,
                 ToolVersion = tool.Version,
+                ToolBinary = tool.Binary,
+                ToolArchitecture = tool.Architecture,
                 Available = tool.Found,
-                UnavailableReason = tool.Found ? null : $"{workload.RequiredTool} not installed",
+                UnavailableReason = tool.Found ? null : tool.Path is null ? $"{workload.RequiredTool} not installed" : $"{workload.RequiredTool} installed but not runnable",
             });
         }
 

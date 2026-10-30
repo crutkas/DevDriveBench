@@ -111,6 +111,11 @@ public sealed class ComparisonRow : Grid
         _systemLane.Letter = info.SystemDrive.Letter;
         _devLane.Letter = info.DevDrive.Letter;
         int iterations = Math.Max(1, info.Iterations);
+        string caption = TestCatalog.EmulationNote(_test, info.Machine) is string note ? $"{_test.Caption}  ·  {note}" : _test.Caption;
+        if (_caption.Text != caption)
+        {
+            _caption.Text = caption;
+        }
 
         bool skipped = t.Status == TestStatus.Skipped;
         _lanes.Visibility = skipped ? Visibility.Collapsed : Visibility.Visible;

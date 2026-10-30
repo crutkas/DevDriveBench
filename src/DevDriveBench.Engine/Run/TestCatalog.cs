@@ -39,7 +39,7 @@ public static class TestCatalog
     {
         GitClone => profile == WorkloadProfile.Thorough ? "15,000 files" : "1,200 files",
         NpmCi => "vscode-eslint · offline",
-        DotnetBuild => "Rx.NET · net6.0",
+        DotnetBuild => "eShop · .NET 10",
         CargoBuild => "microsoft/edit · offline",
         _ => string.Empty,
     };
@@ -76,6 +76,24 @@ public static class TestCatalog
             Disk(DiskRandRead, "Random read 4K", "IOPS", $"{ops} ops · QD1", $"{ops} random 4 KiB reads, queue depth 1, unbuffered"),
             Disk(DiskRandWrite, "Random write 4K", "IOPS", $"{ops} ops · QD1", $"{ops} random 4 KiB writes, queue depth 1, unbuffered + write-through"),
         };
+    }
+
+    /// <summary>
+    /// "x64 node, emulated" when the tool's real binary doesn't match the OS architecture (e.g. an x64
+    /// toolchain on an ARM64 machine, which runs emulated and skews results); null when native or unknown.
+    /// </summary>
+    public static string? EmulationNote(TestDescriptor test, MachineInfo machine)
+    {
+        if (string.IsNullOrEmpty(test.ToolArchitecture) || string.IsNullOrEmpty(machine.OsArchitecture) ||
+            string.Equals(test.ToolArchitecture, machine.OsArchitecture, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        string binary = string.IsNullOrEmpty(test.ToolBinary)
+            ? test.RequiredTool ?? "tool"
+            : Path.GetFileNameWithoutExtension(test.ToolBinary.Replace('/', '\\').Split('\\')[^1]);
+        return $"{test.ToolArchitecture} {binary}, emulated";
     }
 
     private static TestDescriptor Disk(string id, string name, string unit, string caption, string detail) => new()

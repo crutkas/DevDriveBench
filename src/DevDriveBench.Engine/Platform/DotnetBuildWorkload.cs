@@ -1,59 +1,54 @@
 // Ported from crutkas/devdrive (branch crutkas-drive-space-analyzer), MIT License.
-using System.Globalization;
+// Fixture changed from Rx.NET (net6.0) to dotnet/eShop on .NET 10.
 using DevDriveBench.Engine.Abstractions;
-using DevDriveBench.Engine.Model;
 
 namespace DevDriveBench.Engine.Platform;
 
 /// <summary>
-/// Times <c>dotnet build</c> of a real, Microsoft-owned .NET project — <b>dotnet/reactive</b>
-/// (System.Reactive / Rx.NET) — pinned to a tagged release and built for a single modern TFM, on each
-/// drive.
+/// Times <c>dotnet build</c> of a real, Microsoft-owned .NET 10 application — <b>dotnet/eShop</b>
+/// (the reference microservices + Blazor web app) — pinned to a commit, on each drive.
 /// </summary>
 /// <remarks>
-/// <para>The fixture is the actual <c>System.Reactive</c> library at tag <c>rxnet-v6.1.0</c> (the
-/// latest stable), built for <c>net6.0</c> only. <see cref="PrepareCore"/> does the one network step: a
-/// <b>full</b> <c>git clone</c> of the pinned tag and a <c>dotnet restore</c> that warms a seed
-/// <c>NUGET_PACKAGES</c> folder. Each measured iteration <b>freshly copies that warm seed cache onto the
-/// drive under test</b> (a cold, just-written per-drive NuGet cache), copies the source onto the same
-/// drive, re-restores <em>offline</em> against the per-drive cache (untimed setup, see below), then
-/// <b>times</b> <c>dotnet build … -f net6.0 -c Release --no-restore</c> — so the package cache, the
-/// build's package reads, and the <c>obj</c>/<c>bin</c> it churns out all live on the one drive being
-/// measured (the honest "everything on this drive" comparison, not cache-on-C: for both runs).</para>
+/// <para>The fixture is the <c>eShop.Web.slnf</c> solution filter (the web app, services, Aspire
+/// AppHost and their tests; the MAUI clients are excluded). <see cref="PrepareCore"/> does the one
+/// network step: a shallow fetch of the pinned commit and a <c>dotnet restore</c> that warms a seed
+/// <c>NUGET_PACKAGES</c> folder. Each measured iteration <b>freshly copies that warm seed cache onto
+/// the drive under test</b> (a cold, just-written per-drive NuGet cache), copies the source onto the
+/// same drive, re-restores <em>offline</em> against the per-drive cache (untimed setup), then
+/// <b>times</b> <c>dotnet build eShop.Web.slnf -c Release --no-restore</c> — so the package cache,
+/// the build's package reads, and the <c>artifacts</c> output all live on the one drive being
+/// measured.</para>
 /// <para><b>Why an untimed re-restore:</b> <c>dotnet build --no-restore</c> reads packages from the
-/// absolute global-packages path baked into <c>obj</c> at restore time — setting <c>NUGET_PACKAGES</c>
-/// at build time does <em>not</em> re-point those reads. So the seed's <c>obj</c> is deliberately
-/// <em>not</em> copied; instead each iteration runs a fast, fully-offline <c>dotnet restore … --source
-/// &lt;empty&gt;</c> that resolves from the just-copied per-drive cache and regenerates <c>obj</c>
-/// pointing at it. That restore is <b>setup, not measured</b>; only the subsequent compile is timed.</para>
-/// <para><b>Why a full clone:</b> this repo versions itself with Nerdbank.GitVersioning, which throws on
-/// a <em>shallow</em> clone. The clone therefore omits <c>--depth</c>, and the per-iteration copy keeps
-/// <c>.git</c> so NBGV can compute the version during both the re-restore and the build; only <c>bin</c>
-/// and <c>obj</c> are skipped so each iteration is a genuine clean restore + compile.</para>
-/// <para>Only the single <c>net6.0</c> TFM is built — the repo's full multi-TFM build (net472, uap, …)
-/// is fragile, so the benchmark deliberately pins one modern, reliable target. The
-/// <see cref="WorkloadProfile"/> only affects the honest <see cref="Detail"/> wording; the fixture is
-/// the real project either way.</para>
-/// <para><b>Best-effort:</b> if git or the network is unavailable the clone or restore fails and the
+/// absolute global-packages path baked into the restore output, which <c>NUGET_PACKAGES</c> does not
+/// override at build time. So restore output (eShop uses <c>UseArtifactsOutput</c>, i.e.
+/// <c>artifacts/</c>) is never copied; each iteration runs a fully offline restore that resolves from
+/// the just-copied per-drive cache.</para>
+/// <para><b>Fair, cold builds:</b> build servers are shut down (untimed) before and after every timed
+/// build, so the Dev Drive run can't inherit MSBuild worker nodes or a warm compiler server left
+/// behind by the system-drive run (that would favor whichever drive goes second), while the build
+/// still shares its compiler server across projects like a real first build of the day. Restores run
+/// with <c>--disable-build-servers</c>. NuGet audit is disabled because it needs the network and
+/// eShop treats warnings as errors.</para>
+/// <para><b>Best-effort:</b> if git or the network is unavailable the fetch or restore fails and the
 /// benchmark skips with a clear reason rather than fabricating a number.</para>
 /// </remarks>
 public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
 {
-    /// <summary>The real, Microsoft-owned project this benchmark builds.</summary>
-    private const string RepoUrl = "https://github.com/dotnet/reactive.git";
+    /// <summary>The real, Microsoft-owned application this benchmark builds.</summary>
+    private const string RepoUrl = "https://github.com/dotnet/eShop.git";
 
-    /// <summary>The pinned latest-stable release tag (NOT the v7 previews or the ix-net tags).</summary>
-    private const string RepoTag = "rxnet-v6.1.0";
+    /// <summary>Pinned commit (main, .NET 10; global.json SDK 10.0.302, rollForward latestFeature).</summary>
+    public const string RepoCommit = "913acea66708a59595351174cee9b29f37179d29";
 
-    /// <summary>The single project built, relative to the repo root.</summary>
-    private const string ProjectRelativePath = @"Rx.NET\Source\src\System.Reactive\System.Reactive.csproj";
+    /// <summary>The solution filter built: web app + services + AppHost + their tests, no MAUI clients.</summary>
+    private const string SolutionFilter = "eShop.Web.slnf";
 
-    /// <summary>The single modern TFM built (the repo's full multi-TFM build is fragile).</summary>
-    private const string TargetFramework = "net6.0";
+    private const string CommonArgs = "--nologo --disable-build-servers -p:NuGetAudit=false";
 
-    private const int CloneTimeoutMs = 300_000;
-    private const int RestoreTimeoutMs = 300_000;
-    private const int BuildTimeoutMs = 300_000;
+    private const int FetchTimeoutMs = 300_000;
+    private const int SeedRestoreTimeoutMs = 900_000;
+    private const int RestoreTimeoutMs = 600_000;
+    private const int BuildTimeoutMs = 900_000;
 
     private string _repoSeed = string.Empty;
 
@@ -68,9 +63,8 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
     public override string Name => "dotnet build";
 
     /// <inheritdoc />
-    public override string Detail => IsThorough
-        ? $"dotnet/reactive (System.Reactive) {RepoTag} \u00B7 {TargetFramework} \u00B7 cold cache on the test drive \u00B7 offline (Thorough)"
-        : $"dotnet/reactive (System.Reactive) {RepoTag} \u00B7 {TargetFramework} \u00B7 cold cache on the test drive \u00B7 offline (Quick)";
+    public override string Detail =>
+        $"dotnet/eShop @{RepoCommit[..7]} \u00B7 {SolutionFilter} (25 projects, .NET 10) \u00B7 Release \u00B7 cold cache on the test drive \u00B7 offline \u00B7 build servers cold per run ({Profile})";
 
     /// <inheritdoc />
     public override string RequiredTool => "dotnet";
@@ -78,52 +72,125 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
     /// <inheritdoc />
     protected override string Slug => "dotnet-build";
 
-    /// <summary>A full reactive clone (~120&#160;MB working tree + ~46&#160;MB <c>.git</c>) plus per-iteration build copies; require a little more headroom than the default.</summary>
-    protected override long MinFreeBytesPerDrive => 4L * 1024 * 1024 * 1024;
-
-    private bool IsThorough => Profile == WorkloadProfile.Thorough;
+    /// <summary>The eShop seed (source + warm NuGet cache) and per-iteration copies need real headroom.</summary>
+    protected override long MinFreeBytesPerDrive => 8L * 1024 * 1024 * 1024;
 
     /// <inheritdoc />
     protected override void PrepareCore(WorkloadEnvironment environment, CancellationToken cancellationToken)
     {
-        _repoSeed = Path.Combine(SeedDirectory, "reactive");
+        _repoSeed = Path.Combine(SeedDirectory, "eShop");
         _seedCache = Path.Combine(SeedDirectory, "nuget");
         Directory.CreateDirectory(_seedCache);
 
-        // The single network-dependent step (1/2): a FULL clone of the pinned tag. NOT shallow —
-        // Nerdbank.GitVersioning (this repo's versioning) throws on a shallow clone, so the full history
-        // is required. `-c core.longpaths=true` is REQUIRED on Windows: reactive ships UWP DeviceRunner
-        // test artifacts whose paths exceed MAX_PATH (260), so without it `git checkout` aborts
-        // ("Filename too long", exit 128) AFTER the objects fetched fine — which previously surfaced as a
-        // bogus "no network" skip on machines whose git lacks core.longpaths. Skip gracefully (reporting
-        // the REAL reason) when git/network is genuinely unavailable.
-        ProcessRunResult clone = Runner.Run(
-            new WorkloadProcessRequest("git", $"-c core.longpaths=true clone --branch {RepoTag} {RepoUrl} \"{_repoSeed}\"", SeedDirectory, TimeoutMs: CloneTimeoutMs),
-            cancellationToken);
+        // Network step 1/2: a shallow fetch of exactly the pinned commit (reproducible, small).
+        // `core.longpaths` keeps a long checkout path from masquerading as a network failure.
+        RunPrepare(Git("init -q .", _repoSeed), "git init", cancellationToken, FetchTimeoutMs, createDirectory: true);
+        RunPrepare(Git($"fetch -q --depth 1 {RepoUrl} {RepoCommit}", _repoSeed), $"could not fetch dotnet/eShop {RepoCommit[..7]}", cancellationToken, FetchTimeoutMs);
+        RunPrepare(Git("-c core.longpaths=true checkout -q FETCH_HEAD", _repoSeed), "could not check out dotnet/eShop", cancellationToken, FetchTimeoutMs);
 
-        if (clone.TimedOut || clone.ExitCode != 0)
+        // eShop's nuget.config clears every source except nuget.org. Where nuget.org can't be reached
+        // (e.g. corporate networks that proxy it), inherit the machine's configured feeds instead. This
+        // only changes where the one-time seed download comes from; measured restores are offline.
+        if (!IsReachable(NuGetOrgIndex))
         {
-            throw new WorkloadUnavailableException($"could not clone dotnet/reactive {RepoTag}: {DescribeProcessFailure(clone, CloneTimeoutMs)}");
+            File.WriteAllText(
+                Path.Combine(_repoSeed, "nuget.config"),
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <!-- DevDriveBench: nuget.org unreachable; inherit this machine's NuGet feeds. -->\n  <packageSources />\n</configuration>\n");
         }
 
-        // The single network-dependent step (2/2): warm a seed global-packages folder once. Measured
-        // iterations copy this cold onto the test drive and re-restore offline from the copy. Fail fast
-        // (skip) when there is no network.
-        string projectPath = Path.Combine(_repoSeed, ProjectRelativePath);
-        ProcessRunResult restore = Runner.Run(
-            new WorkloadProcessRequest("dotnet", $"restore \"{projectPath}\" --nologo", _repoSeed, NugetEnvironment(_seedCache), RestoreTimeoutMs),
-            cancellationToken);
+        // Network step 2/2: warm a seed global-packages folder once. Measured iterations copy it cold
+        // onto the test drive and re-restore offline from the copy.
+        RunPrepare(
+            new WorkloadProcessRequest("dotnet", $"restore {SolutionFilter} {CommonArgs}", _repoSeed, NugetEnvironment(_seedCache), SeedRestoreTimeoutMs),
+            "could not restore NuGet packages for dotnet/eShop",
+            cancellationToken,
+            SeedRestoreTimeoutMs);
+    }
 
-        if (restore.TimedOut || restore.ExitCode != 0)
+    /// <inheritdoc />
+    protected override double MeasureCore(string driveRoot, string workDir, string cacheDir, CancellationToken cancellationToken)
+    {
+        // SETUP (untimed) 1/3: a cold copy of the warm seed NuGet cache on the drive under test.
+        PopulateColdCache(_seedCache, cacheDir);
+
+        // SETUP (untimed) 2/3: the source, without git metadata or any build/restore output (the
+        // offline restore below regenerates it pointing at the per-drive cache).
+        CopyDirectory(_repoSeed, workDir, skipDirectory: name => name is ".git" or "artifacts" or "bin" or "obj" or "node_modules");
+
+        IReadOnlyDictionary<string, string> nugetEnvironment = NugetEnvironment(cacheDir);
+
+        // SETUP (untimed) 3/3: restore OFFLINE against the per-drive cache. `--source <empty dir>`
+        // overrides every feed, so nothing can come from the network.
+        string offlineFeed = Path.Combine(workDir, "_offline-feed");
+        Directory.CreateDirectory(offlineFeed);
+        RunChecked(
+            new WorkloadProcessRequest(
+                "dotnet",
+                $"restore {SolutionFilter} {CommonArgs} --source \"{offlineFeed}\"",
+                workDir,
+                nugetEnvironment,
+                RestoreTimeoutMs),
+            cancellationToken,
+            "dotnet restore (offline, per-drive cache)");
+
+        // TIMED: the build of the whole solution filter, resolving from the per-drive cache. Build servers
+        // are shut down (untimed) first and after, so each drive's build starts with no warm MSBuild
+        // nodes or compiler server inherited from the other drive's run, yet shares its compiler
+        // server across projects within the build like a real first build of the day.
+        ShutdownBuildServers(workDir, nugetEnvironment, cancellationToken);
+        double seconds = TimeProcess(
+            new WorkloadProcessRequest(
+                "dotnet",
+                $"build {SolutionFilter} -c Release --no-restore --nologo -p:NuGetAudit=false",
+                workDir,
+                nugetEnvironment,
+                BuildTimeoutMs),
+            cancellationToken,
+            "dotnet build");
+        ShutdownBuildServers(workDir, nugetEnvironment, cancellationToken);
+        return seconds;
+    }
+
+    private void ShutdownBuildServers(string workDir, IReadOnlyDictionary<string, string> environment, CancellationToken cancellationToken) =>
+        Runner.Run(new WorkloadProcessRequest("dotnet", "build-server shutdown", workDir, environment, 120_000), cancellationToken);
+
+    private void RunPrepare(WorkloadProcessRequest request, string what, CancellationToken cancellationToken, int timeoutMs, bool createDirectory = false)
+    {
+        if (createDirectory && request.WorkingDirectory is string dir)
         {
-            throw new WorkloadUnavailableException($"could not restore NuGet packages for dotnet/reactive: {DescribeProcessFailure(restore, RestoreTimeoutMs)}");
+            Directory.CreateDirectory(dir);
+        }
+
+        ProcessRunResult result = Runner.Run(request, cancellationToken);
+        if (result.TimedOut || result.ExitCode != 0)
+        {
+            throw new WorkloadUnavailableException($"{what}: {DescribeProcessFailure(result, timeoutMs)}");
+        }
+    }
+
+    private static WorkloadProcessRequest Git(string arguments, string workingDirectory) =>
+        new("git", arguments, workingDirectory, TimeoutMs: FetchTimeoutMs);
+
+    private const string NuGetOrgIndex = "https://api.nuget.org/v3/index.json";
+
+    /// <summary>True when an HTTPS GET of <paramref name="url"/> succeeds within a few seconds.</summary>
+    private static bool IsReachable(string url)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            using HttpResponseMessage response = http.Send(new HttpRequestMessage(HttpMethod.Get, url));
+            return response.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
         }
     }
 
     /// <summary>
-    /// Builds a concise, HONEST skip reason from a failed process result — a timeout, or the last
-    /// meaningful stderr/stdout line — instead of guessing "no network" (which mis-attributed real
-    /// failures such as the long-path checkout error above).
+    /// Builds a concise, honest skip reason from a failed process result — a timeout, or the last
+    /// meaningful stderr/stdout line — instead of guessing "no network".
     /// </summary>
     private static string DescribeProcessFailure(ProcessRunResult result, int timeoutMs)
     {
@@ -157,82 +224,11 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
         return line.Length <= max ? line : string.Concat(line.AsSpan(0, max), "\u2026");
     }
 
-    /// <inheritdoc />
-    protected override double MeasureCore(string driveRoot, string workDir, string cacheDir, CancellationToken cancellationToken)
-    {
-        // SETUP (untimed) 1/3: freshly populate the per-drive NuGet cache with a cold copy of the warm
-        // seed global-packages folder, so the timed build's package reads land on the SAME drive under
-        // test (not a cache on C:).
-        PopulateColdCache(_seedCache, cacheDir);
-
-        // SETUP (untimed) 2/3: copy the source onto the drive, keeping .git (NBGV computes the version
-        // from it). Skip bin AND obj: obj is regenerated by the offline re-restore below so its baked
-        // global-packages paths point at the per-drive cache — copying the seed's obj would instead leave
-        // the build reading packages from the seed cache on C: (dotnet build --no-restore resolves from
-        // the absolute path baked into obj, which NUGET_PACKAGES does not override at build time).
-        CopyDirectory(_repoSeed, workDir, skipDirectory: name => name is "bin" or "obj");
-
-        string projectPath = Path.Combine(workDir, ProjectRelativePath);
-        IReadOnlyDictionary<string, string> nugetEnvironment = NugetEnvironment(cacheDir);
-
-        // SETUP (untimed) 3/3: re-restore OFFLINE against the per-drive cache so obj is regenerated
-        // pointing at it. `--source <empty>` overrides all feeds, guaranteeing no network — every package
-        // is resolved from the just-copied per-drive global-packages folder. This is fast (a no-op-style
-        // resolve over an already-populated folder) and is deliberately NOT timed.
-        string offlineFeed = Path.Combine(workDir, "_offline-feed");
-        Directory.CreateDirectory(offlineFeed);
-        RunChecked(
-            new WorkloadProcessRequest(
-                "dotnet",
-                $"restore \"{projectPath}\" --nologo --source \"{offlineFeed}\"",
-                workDir,
-                nugetEnvironment,
-                RestoreTimeoutMs),
-            cancellationToken,
-            "dotnet restore (offline, per-drive cache)");
-
-        // Time only the single net6.0 TFM compile, resolving from the per-drive cache. The package cache,
-        // the build's reads, and the obj/bin it churns out are therefore all on this drive.
-        return TimeProcess(
-            new WorkloadProcessRequest(
-                "dotnet",
-                $"build \"{projectPath}\" -f {TargetFramework} -c Release --no-restore --nologo",
-                workDir,
-                nugetEnvironment,
-                BuildTimeoutMs),
-            cancellationToken,
-            "dotnet build");
-    }
-
-    /// <summary>Parses the SDK version ("10.0.100") into a TFM ("net10.0"). Returns <c>null</c> when unparseable.</summary>
-    /// <remarks>
-    /// Retained as a reusable, tested pure helper (the TFM this benchmark builds is fixed to
-    /// <see cref="TargetFramework"/>); see the pre-flight unit tests.
-    /// </remarks>
-    public static string? ParseTargetFramework(string? dotnetVersionOutput)
-    {
-        if (string.IsNullOrWhiteSpace(dotnetVersionOutput))
-        {
-            return null;
-        }
-
-        string first = dotnetVersionOutput.Trim().Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
-
-        // Strip any leading non-digits (e.g. a stray "v").
-        first = new string(first.SkipWhile(c => !char.IsDigit(c)).TakeWhile(char.IsDigit).ToArray());
-        return int.TryParse(first, NumberStyles.Integer, CultureInfo.InvariantCulture, out int major) && major >= 5
-            ? $"net{major}.0"
-            : null;
-    }
-
     private static Dictionary<string, string> NugetEnvironment(string packagesDir)
     {
-        // C7: redirect EVERY NuGet/dotnet cache under the supplied packages dir, not just the global
-        // packages folder. Otherwise NuGet's HTTP cache, plugins cache, scratch, and the .NET CLI home
-        // still default to the real user profile — leaving artifacts behind and polluting real caches.
-        // For the seed restore this is the %TEMP% seed tree; for a measured iteration it is the per-drive
-        // cache (so all NuGet/dotnet I/O stays on the drive under test). Both are tracked and deleted in
-        // Cleanup. The tools assume these directories exist, so create them up-front (idempotent).
+        // Redirect EVERY NuGet/dotnet cache under the supplied packages dir, not just the global
+        // packages folder, so nothing touches (or pollutes) the real user-profile caches and all
+        // NuGet/dotnet I/O stays on the drive under test. The tools assume these exist.
         string httpCache = Path.Combine(packagesDir, "http-cache");
         string pluginsCache = Path.Combine(packagesDir, "plugins-cache");
         string scratch = Path.Combine(packagesDir, "scratch");

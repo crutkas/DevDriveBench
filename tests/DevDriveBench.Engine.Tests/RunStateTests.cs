@@ -9,13 +9,13 @@ internal static class Sample
     {
         RunId = "test",
         StartedAt = new DateTimeOffset(2026, 10, 29, 12, 0, 0, TimeSpan.Zero),
-        Machine = new MachineInfo { Name = "BENCH", Cpu = "Test CPU, 8 cores", Os = "Windows" },
+        Machine = new MachineInfo { Name = "BENCH", Cpu = "Test CPU, 8 cores", Os = "Windows", OsArchitecture = "arm64" },
         SystemDrive = new DriveDescriptor { Root = @"C:\", FileSystem = "NTFS", IsSystem = true },
         DevDrive = new DriveDescriptor { Root = @"D:\", FileSystem = "ReFS", IsDevDrive = true, BusType = "File Backed Virtual", BackingFile = @"C:\dev.vhdx" },
         Iterations = iterations,
         Tests = new[]
         {
-            new TestDescriptor { Id = "git-clone", Group = "git-clone", IsWorkload = true, Name = "git clone", Unit = "s", Better = Better.Lower },
+            new TestDescriptor { Id = "git-clone", Group = "git-clone", IsWorkload = true, Name = "git clone", Unit = "s", Better = Better.Lower, RequiredTool = "git", ToolVersion = "2.56.0", ToolArchitecture = "x64" },
             new TestDescriptor { Id = "npm-ci", Group = "npm-ci", IsWorkload = true, Name = "npm ci", Unit = "s", Better = Better.Lower },
             new TestDescriptor { Id = "disk-seq-read", Group = "disk", Name = "Sequential read", Unit = "MB/s", Better = Better.Higher },
         },

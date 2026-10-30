@@ -12,17 +12,18 @@ namespace DevDriveBench.Engine.Platform;
 /// <para>The fixture is the <c>eShop.Web.slnf</c> solution filter (the web app, services, Aspire
 /// AppHost and their tests; the MAUI clients are excluded). <see cref="PrepareCore"/> does the one
 /// network step: a shallow fetch of the pinned commit and a <c>dotnet restore</c> that warms a seed
-/// <c>NUGET_PACKAGES</c> folder. Each measured iteration <b>freshly copies that warm seed cache onto
-/// the drive under test</b> (a cold, just-written per-drive NuGet cache), copies the source onto the
-/// same drive, re-restores <em>offline</em> against the per-drive cache (untimed setup), then
-/// <b>times</b> <c>dotnet build eShop.Web.slnf -c Release --no-restore</c> — so the package cache,
-/// the build's package reads, and the <c>artifacts</c> output all live on the one drive being
-/// measured.</para>
+/// <c>NUGET_PACKAGES</c> folder, which is then staged onto the drives (see
+/// <see cref="WorkloadBenchmarkBase"/>). Each measured iteration copies the source onto the drive under
+/// test, re-restores <em>offline</em> against the staged cache on the drive the plan chose (untimed
+/// setup), then <b>times</b> <c>dotnet build eShop.Web.slnf -c Release --no-restore</c> — so the
+/// <c>artifacts</c> output is on the code drive and the build's package reads are on the packages
+/// drive.</para>
 /// <para><b>Why an untimed re-restore:</b> <c>dotnet build --no-restore</c> reads packages from the
 /// absolute global-packages path baked into the restore output, which <c>NUGET_PACKAGES</c> does not
 /// override at build time. So restore output (eShop uses <c>UseArtifactsOutput</c>, i.e.
 /// <c>artifacts/</c>) is never copied; each iteration runs a fully offline restore that resolves from
-/// the just-copied per-drive cache.</para>
+/// the staged cache. NuGet's HTTP download cache is left out of staged copies: offline restores never
+/// read it.</para>
 /// <para><b>Fair, cold builds:</b> build servers are shut down (untimed, while the next iteration's
 /// setup copies files) and must be gone before every timed build, so the Dev Drive run can't inherit
 /// MSBuild worker nodes or a warm compiler server left behind by the system-drive run (that would
@@ -65,7 +66,7 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
 
     /// <inheritdoc />
     public override string Detail =>
-        $"dotnet/eShop @{RepoCommit[..7]} \u00B7 {SolutionFilter} (25 projects, .NET 10) \u00B7 Release \u00B7 cold cache on the test drive \u00B7 offline \u00B7 build servers cold per run ({Profile})";
+        $"dotnet/eShop @{RepoCommit[..7]} \u00B7 {SolutionFilter} (25 projects, .NET 10) \u00B7 Release \u00B7 NUGET_PACKAGES staged at Prepare \u00B7 offline \u00B7 build servers cold per run ({Profile})";
 
     /// <inheritdoc />
     public override string RequiredTool => "dotnet";
@@ -117,14 +118,11 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
         Task shutdown = Task.Run(() => ShutdownBuildServers(_repoSeed, cancellationToken), CancellationToken.None);
         try
         {
-            // SETUP (untimed) 1/3: a cold copy of the warm seed NuGet cache on the drive under test.
-            PopulateColdCache(_seedCache, cacheDir);
-
-            // SETUP (untimed) 2/3: the source, without git metadata or any build/restore output (the
-            // offline restore below regenerates it pointing at the per-drive cache).
+            // SETUP (untimed) 1/2: the source, without git metadata or any build/restore output (the
+            // offline restore below regenerates it pointing at the staged NuGet cache).
             CopyDirectory(_repoSeed, workDir, skipDirectory: name => name is ".git" or "artifacts" or "bin" or "obj" or "node_modules");
 
-            // SETUP (untimed) 3/3: restore OFFLINE against the per-drive cache. `--source <empty dir>`
+            // SETUP (untimed) 2/2: restore OFFLINE against the staged cache. `--source <empty dir>`
             // overrides every feed, so nothing can come from the network.
             string offlineFeed = Path.Combine(workDir, "_offline-feed");
             Directory.CreateDirectory(offlineFeed);
@@ -170,6 +168,19 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
             cancellationToken,
             "dotnet build");
     }
+
+    /// <inheritdoc />
+    protected override string? PackageSeed => _seedCache;
+
+    /// <inheritdoc />
+    protected override bool SkipWhenStaging(string directoryName) => directoryName is "http-cache";
+
+    /// <summary>
+    /// The timed build only reads <c>NUGET_PACKAGES</c>, and the untimed offline restore finds every package
+    /// already there, so the large staged caches stay as staged at Prepare instead of being rewritten
+    /// between runs.
+    /// </summary>
+    protected override bool RunsWritePackages => false;
 
     /// <inheritdoc />
     protected override void ReleaseResources()
@@ -281,6 +292,11 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
             ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
             ["DOTNET_NOLOGO"] = "1",
             ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1",
+
+            // The SDK's background workload-update check would query NuGet feeds and write into the
+            // staged cache during setup or the timed build; benchmark runs stay offline and leave the
+            // cache as staged. (The SDK parses this one as a bool: "1" is ignored, "true" works.)
+            ["DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE"] = "true",
         };
     }
 }

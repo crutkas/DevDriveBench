@@ -4,7 +4,7 @@ using DevDriveBench.Engine.Platform;
 using DevDriveBench.Engine.Run;
 
 // Headless runner for data gathering: same engine, same recordings (replayable in the app).
-//   devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,...] [--dev D:] [--out DIR] [--prepare] [--list] [--timing FILE]
+//   devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,...] [--dev D:] [--out DIR] [--prepare] [--packages optimal|c|both] [--list] [--timing FILE]
 
 var options = Args.Parse(args);
 
@@ -12,7 +12,7 @@ var options = Args.Parse(args);
 EnvironmentRefresher.RefreshPath();
 if (options.Help)
 {
-    Console.WriteLine("devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,npm-ci,dotnet-build,cargo-build] [--dev D:] [--out DIR] [--prepare] [--list] [--timing RECORDING.json]");
+    Console.WriteLine("devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,npm-ci,dotnet-build,cargo-build] [--dev D:] [--out DIR] [--prepare] [--packages optimal|c|both] [--list] [--timing RECORDING.json]");
     return 0;
 }
 
@@ -81,32 +81,77 @@ if (options.Prepare)
     Console.WriteLine($"  prepared in {preparation.DurationSeconds:0.0}s ({preparation.Outcome})\n");
 }
 
-RunRecording recording = await runner.RunAsync(plan, Print, cancellationToken: cts.Token);
-if (preparation is not null && recording.Info.PreparedAhead)
+// --packages both: "C drive" first (the Dev Drive run reads packages from C:), then "optimal drive" (each
+// run's packages on its own drive) with the first run kept next to it: moving the packages is the second jump.
+PackageLocation[] locations = options.Packages switch
 {
-    recording = recording with { Preparation = preparation };
+    "system" => new[] { PackageLocation.SystemDrive },
+    "both" => new[] { PackageLocation.SystemDrive, PackageLocation.DevDrive },
+    _ => new[] { PackageLocation.DevDrive },
+};
+
+RunRecording? previous = null;
+RunRecording recording = null!;
+foreach (PackageLocation packages in locations)
+{
+    Console.WriteLine(packages == PackageLocation.SystemDrive
+        ? $"  packages: {system.Letter.TrimEnd(':')} drive (the {dev.Letter} run reads npm_config_cache, NUGET_PACKAGES, CARGO_HOME from {system.Letter}; this process only)"
+        : $"  packages: optimal drive (each run's npm_config_cache, NUGET_PACKAGES, CARGO_HOME on its own drive; this process only)");
+    var wall = System.Diagnostics.Stopwatch.StartNew();
+    recording = await runner.RunAsync(plan with { Packages = packages }, Print, cancellationToken: cts.Token);
+    double finishing = wall.Elapsed.TotalSeconds - recording.DurationSeconds;
+    if (preparation is not null && recording.Info.PreparedAhead)
+    {
+        recording = recording with { Preparation = preparation };
+    }
+
+    if (previous is not null && ComparisonRun.Pairs(recording.Info, previous.Info))
+    {
+        recording = recording with { Comparison = ComparisonRun.From(previous) };
+    }
+
+    Console.WriteLine();
+    foreach (TestResult r in recording.Results)
+    {
+        string line = r.Status == TestStatus.Skipped
+            ? $"  {r.Name,-18} skipped: {r.SkipReason}"
+            : $"  {r.Name,-18} {Fmt(r.SystemValue, r.Unit),12}  {Fmt(r.DevValue, r.Unit),12}  {(r.Advantage is double a ? a.ToString("0.00", CultureInfo.InvariantCulture) + "x" : "")}";
+        Console.WriteLine(line);
+    }
+
+    if (recording.Headline is double h)
+    {
+        Console.WriteLine($"\n  Dev Drive workloads: {h.ToString("0.00", CultureInfo.InvariantCulture)}x faster (median)");
+    }
+
+    PrintStage(recording);
+    Console.WriteLine($"  after the result: {finishing:0.0}s deleting run files and re-staging packages (off the measured path)");
+
+    string path = RecordingStore.Save(recording, options.Out);
+    Console.WriteLine($"\n  {recording.Outcome} in {recording.DurationSeconds:0.0}s -> {path}\n");
+    if (recording.Outcome != RunOutcome.Completed)
+    {
+        break;
+    }
+
+    previous = recording;
 }
 
 runner.ReleasePrepared();
 
-Console.WriteLine();
-foreach (TestResult r in recording.Results)
+if (recording.Comparison is ComparisonRun other)
 {
-    string line = r.Status == TestStatus.Skipped
-        ? $"  {r.Name,-18} skipped: {r.SkipReason}"
-        : $"  {r.Name,-18} {Fmt(r.SystemValue, r.Unit),12}  {Fmt(r.DevValue, r.Unit),12}  {(r.Advantage is double a ? a.ToString("0.00", CultureInfo.InvariantCulture) + "x" : "")}";
-    Console.WriteLine(line);
+    // Three scenarios per workload: everything on C:, code on the Dev Drive with packages on C:, everything on the Dev Drive.
+    Console.WriteLine($"  {"",-18} {system.Letter + " code+pkgs",14} {dev.Letter + " code, " + system.Letter + " pkgs",16} {dev.Letter + " code+pkgs",14}");
+    foreach (TestResult r in recording.Results.Where(r => TestCatalog.PackageVariable(r.TestId) is not null && r.Status != TestStatus.Skipped))
+    {
+        TestResult? o = other.Results.FirstOrDefault(x => x.TestId == r.TestId);
+        Console.WriteLine($"  {r.Name,-18} {Fmt(r.SystemValue, r.Unit),14} {Fmt(o?.DevValue, r.Unit),16} {Fmt(r.DevValue, r.Unit),14}");
+    }
+
+    Console.WriteLine();
 }
 
-if (recording.Headline is double h)
-{
-    Console.WriteLine($"\n  Dev Drive workloads: {h.ToString("0.00", CultureInfo.InvariantCulture)}x faster (median)");
-}
-
-PrintStage(recording);
-
-string path = RecordingStore.Save(recording, options.Out);
-Console.WriteLine($"\n  {recording.Outcome} in {recording.DurationSeconds:0.0}s -> {path}");
 return recording.Outcome == RunOutcome.Completed ? 0 : 1;
 
 static void PrintStage(RunRecording recording)
@@ -149,6 +194,7 @@ internal sealed record Args
     public string? Out { get; init; }
     public bool List { get; init; }
     public bool Prepare { get; init; }
+    public string Packages { get; init; } = "dev";
     public string? Timing { get; init; }
     public bool Help { get; init; }
 
@@ -167,6 +213,13 @@ internal sealed record Args
                 "--out" => a with { Out = Next() },
                 "--list" => a with { List = true },
                 "--prepare" => a with { Prepare = true },
+                "--packages" => Next().ToLowerInvariant() switch
+                {
+                    "both" => a with { Packages = "both" },
+                    "c" or "c:" or "system" or "sys" => a with { Packages = "system" },
+                    "optimal" or "dev" or "devdrive" => a with { Packages = "dev" },
+                    _ => a with { Help = true },
+                },
                 "--timing" => a with { Timing = Next() },
                 _ => a with { Help = true },
             };

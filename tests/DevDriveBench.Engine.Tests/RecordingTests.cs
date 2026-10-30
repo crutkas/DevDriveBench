@@ -103,8 +103,62 @@ public class RecordingTests : IDisposable
         // Machine CPU contains a comma and must be quoted.
         Assert.Contains("\"Test CPU, 8 cores\"", lines[1]);
 
-        // Tool provenance closes every row, so an emulated toolchain is visible in the data.
-        Assert.EndsWith(",git,2.56.0,x64,arm64", lines[1].TrimEnd('\r'));
+        // Tool provenance follows, so an emulated toolchain is visible in the data; git has no package cache.
+        Assert.EndsWith(",git,2.56.0,x64,arm64,,", lines[1].TrimEnd('\r'));
+    }
+
+    [Fact]
+    public void CsvRecordsWhereEachRowsPackagesLived()
+    {
+        RunInfo info = Sample.Info() with
+        {
+            Packages = PackageLocation.SystemDrive,
+            Tests = new[] { new TestDescriptor { Id = "npm-ci", Group = "npm-ci", IsWorkload = true, Name = "npm ci", Unit = "s", Better = Better.Lower, PackageVariable = "npm_config_cache" } },
+        };
+        var events = new List<BenchEvent>
+        {
+            new RunStartedEvent(info) { T = 0 },
+            new MeasurementEvent("npm-ci", DriveRole.System, 1, 8) { T = 1 },
+            new MeasurementEvent("npm-ci", DriveRole.Dev, 1, 7) { T = 2 },
+            new TestCompletedEvent("npm-ci") { T = 3 },
+            new RunCompletedEvent(RunOutcome.Completed) { T = 4 },
+        };
+
+        string[] lines = RecordingStore.ToCsv(RunRecording.FromEvents(events)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.EndsWith(",package_var,packages_drive", lines[0].TrimEnd('\r'));
+        Assert.EndsWith(",npm_config_cache,C:", lines[1].TrimEnd('\r'));
+        Assert.Contains(",Dev,D:,", lines[2]);
+        Assert.EndsWith(",npm_config_cache,C:", lines[2].TrimEnd('\r'));
+    }
+
+    [Fact]
+    public void ComparisonIsSavedWithTheRunAndPairsOnlyTheOtherLocation()
+    {
+        RunRecording onSystem = RunRecording.FromEvents(Sample.Stream());
+        onSystem = onSystem with { Info = onSystem.Info with { Packages = PackageLocation.SystemDrive } };
+        RunRecording onDev = RunRecording.FromEvents(Sample.Stream()) with { Comparison = ComparisonRun.From(onSystem) };
+
+        RunRecording loaded = RecordingStore.Load(RecordingStore.Save(onDev, _dir));
+        Assert.Equal(PackageLocation.DevDrive, loaded.Info.Packages);
+        Assert.Equal(PackageLocation.SystemDrive, loaded.Comparison!.Packages);
+        Assert.Equal(onSystem.Results.Count, loaded.Comparison.Results.Count);
+        Assert.Equal(onSystem.Headline, loaded.Comparison.Headline);
+
+        Assert.True(ComparisonRun.Pairs(onDev.Info, onSystem.Info));
+        Assert.False(ComparisonRun.Pairs(onDev.Info, onDev.Info));
+        Assert.False(ComparisonRun.Pairs(onDev.Info, onSystem.Info with { DevDrive = onSystem.Info.DevDrive with { Root = @"E:\" } }));
+    }
+
+    [Fact]
+    public void RecordingsFromBeforePackageLocationsReadAsPackagesOnTheDevDrive()
+    {
+        string json = System.Text.Json.JsonSerializer.Serialize(RunRecording.FromEvents(Sample.Stream()), RecordingStore.JsonOptions);
+        json = json.Replace(",\"packages\":\"devDrive\"", string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"packages\"", json);
+
+        RunRecording old = System.Text.Json.JsonSerializer.Deserialize<RunRecording>(json, RecordingStore.JsonOptions)!;
+        Assert.Equal(PackageLocation.DevDrive, old.Info.Packages);
+        Assert.Null(old.Comparison);
     }
 
     [Fact]

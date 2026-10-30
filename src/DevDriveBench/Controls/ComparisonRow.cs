@@ -9,18 +9,23 @@ using Microsoft.UI.Xaml.Media;
 namespace DevDriveBench.Controls;
 
 /// <summary>
-/// One result row: name, the system-drive lane over the Dev Drive lane on a shared scale, and the
-/// Dev Drive advantage. Pending rows recede; the active row is full strength.
+/// One result row: name, the system-drive lane over the Dev Drive lane(s) on a shared scale, and the
+/// Dev Drive advantage. Workloads with a package cache can show two Dev Drive lanes, in scenario order:
+/// code on the Dev Drive with packages on the system drive, then code and packages on the Dev Drive —
+/// one from this run, the other from the latest run with the packages on the other drive.
+/// Pending rows recede; the active row is full strength.
 /// </summary>
 public sealed class ComparisonRow : Grid
 {
     private readonly TestDescriptor _test;
     private readonly bool _compact;
+    private readonly string? _packageVariable;
     private readonly TextBlock _name;
     private readonly TextBlock _caption;
     private readonly LaneView _systemLane;
+    private readonly LaneView _mixedLane;
     private readonly LaneView _devLane;
-    private readonly Grid _lanes;
+    private readonly StackPanel _lanes;
     private readonly TextBlock _skip;
     private readonly TextBlock _advantage;
     private readonly TextBlock _status;
@@ -31,6 +36,9 @@ public sealed class ComparisonRow : Grid
     {
         _test = test;
         _compact = compact;
+
+        // Recordings from before package locations lack the variable; the workload still had one.
+        _packageVariable = test.PackageVariable ?? (test.IsWorkload ? TestCatalog.PackageVariable(test.Group) : null);
         ColumnSpacing = 24;
         Padding = compact ? new Thickness(0, 7, 0, 7) : new Thickness(0, 12, 0, 12);
         ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(250) });
@@ -60,12 +68,12 @@ public sealed class ComparisonRow : Grid
 
         double laneHeight = compact ? 12 : 22;
         _systemLane = CreateLane(laneHeight, Theme.SystemDrive, Theme.SystemDriveLive);
+        _mixedLane = CreateLane(laneHeight, Theme.DevDriveMixed, Theme.DevDriveLive);
         _devLane = CreateLane(laneHeight, Theme.DevDrive, Theme.DevDriveLive);
-        _lanes = new Grid { RowSpacing = compact ? 6 : 10, VerticalAlignment = VerticalAlignment.Center };
-        _lanes.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        _lanes.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _mixedLane.Visibility = Visibility.Collapsed;
+        _lanes = new StackPanel { Spacing = compact ? 6 : 10, VerticalAlignment = VerticalAlignment.Center };
         _lanes.Children.Add(_systemLane);
-        SetRow(_devLane, 1);
+        _lanes.Children.Add(_mixedLane);
         _lanes.Children.Add(_devLane);
         SetColumn(_lanes, 1);
         Children.Add(_lanes);
@@ -106,9 +114,10 @@ public sealed class ComparisonRow : Grid
 
     public string TestId => _test.Id;
 
-    public void Render(TestState t, RunInfo info, double now)
+    public void Render(TestState t, RunInfo info, double now, TestResult? other = null)
     {
         _systemLane.Letter = info.SystemDrive.Letter;
+        _mixedLane.Letter = info.DevDrive.Letter;
         _devLane.Letter = info.DevDrive.Letter;
         int iterations = Math.Max(1, info.Iterations);
         string caption = TestCatalog.EmulationNote(_test, info.Machine) is string note ? $"{_test.Caption}  ·  {note}" : _test.Caption;
@@ -130,13 +139,23 @@ public sealed class ComparisonRow : Grid
             _ => 1,
         };
 
+        // This run's Dev Drive result goes in the lane for its package location; the latest run with the
+        // packages on the other drive (if any) fills the other lane, so both scenarios read top to bottom.
+        bool packagesOnSystem = _packageVariable is not null && info.Packages == PackageLocation.SystemDrive;
+        LaneView current = packagesOnSystem ? _mixedLane : _devLane;
+        LaneView reference = packagesOnSystem ? _devLane : _mixedLane;
+        TestResult? cmp = _packageVariable is not null && other is { DevValue: not null, Status: not TestStatus.Skipped } ? other : null;
+        current.Visibility = Visibility.Visible;
+        reference.Visibility = cmp is null ? Visibility.Collapsed : Visibility.Visible;
+
         double? liveSystem = Live(t, DriveRole.System, now);
         double? liveDev = Live(t, DriveRole.Dev, now);
 
-        double target = new[] { t.SystemValue, t.DevValue, liveSystem, liveDev }
+        double target = new[] { t.SystemValue, t.DevValue, liveSystem, liveDev, cmp?.DevValue }
             .Where(v => v is not null)
             .Select(v => v!.Value)
             .Concat(iterations >= 2 ? t.SystemRuns.Concat(t.DevRuns) : Enumerable.Empty<double>())
+            .Concat(cmp is { DevRuns.Count: >= 2 } ? cmp.DevRuns : Enumerable.Empty<double>())
             .DefaultIfEmpty(0)
             .Max();
         target = target <= 0 ? 1 : target * 1.02;
@@ -145,8 +164,20 @@ public sealed class ComparisonRow : Grid
         bool live = liveSystem is not null || liveDev is not null;
         _scale = live ? Math.Max(_scale, target) : target;
 
-        _systemLane.Render(Lane(t, DriveRole.System, t.SystemValue, liveSystem, iterations));
-        _devLane.Render(Lane(t, DriveRole.Dev, t.DevValue, liveDev, iterations));
+        _systemLane.Render(Lane(t, DriveRole.System, t.SystemValue, liveSystem, iterations, hint: null));
+        current.Render(Lane(t, DriveRole.Dev, t.DevValue, liveDev, iterations, PackagesHint(info, packagesOnSystem)));
+        if (cmp is not null)
+        {
+            reference.Render(new LaneSnapshot(
+                cmp.DevValue,
+                null,
+                Fmt.Value(cmp.DevValue!.Value, _test.Unit),
+                null,
+                cmp.DevRuns,
+                cmp.DevRuns.Count >= 2,
+                PackagesHint(info, !packagesOnSystem),
+                _scale));
+        }
 
         if (t.Advantage is double a && !skipped)
         {
@@ -159,12 +190,18 @@ public sealed class ComparisonRow : Grid
             _advantage.Foreground = Theme.Tertiary;
         }
 
-        _status.Text = Status(t, info, now, iterations);
-        _status.Foreground = t.Status == TestStatus.Ready ? Theme.DevDrive : Theme.Tertiary;
+        string status = Status(t, info, now, iterations);
+        string? otherAdvantage = cmp?.Advantage is double oa
+            ? $"{Fmt.Ratio(oa)}  ·  packages: {TestCatalog.PackagesMode(packagesOnSystem ? PackageLocation.DevDrive : PackageLocation.SystemDrive, info)}"
+            : null;
+        _status.Text = status.Length == 0 && !skipped && otherAdvantage is not null ? otherAdvantage : status;
+        _status.Foreground = t.Status == TestStatus.Ready ? Theme.DevDrive : status.Length == 0 && otherAdvantage is not null ? Theme.Secondary : Theme.Tertiary;
 
+        string packagesNote = _packageVariable is null ? string.Empty : $" with packages on {(packagesOnSystem ? info.SystemDrive.Letter : info.DevDrive.Letter)}";
         string name = skipped
             ? $"{_test.Name}: skipped, {t.SkipReason}"
-            : $"{_test.Name}: {info.SystemDrive.Letter} {Text(t.SystemValue)}, {info.DevDrive.Letter} {Text(t.DevValue)}{(t.Advantage is double adv ? $", Dev Drive advantage {Fmt.Ratio(adv)}" : string.Empty)}";
+            : $"{_test.Name}: {info.SystemDrive.Letter} {Text(t.SystemValue)}, {info.DevDrive.Letter}{packagesNote} {Text(t.DevValue)}{(t.Advantage is double adv ? $", Dev Drive advantage {Fmt.Ratio(adv)}" : string.Empty)}" +
+              (cmp is null ? string.Empty : $"; earlier run with packages on {(packagesOnSystem ? info.DevDrive.Letter : info.SystemDrive.Letter)}: {info.DevDrive.Letter} {Text(cmp.DevValue)}{(cmp.Advantage is double ca ? $", {Fmt.Ratio(ca)}" : string.Empty)}");
         if (name != _automationName)
         {
             _automationName = name;
@@ -172,11 +209,18 @@ public sealed class ComparisonRow : Grid
         }
     }
 
+    /// <summary>Names the variable that placed this lane's packages, e.g. "NUGET_PACKAGES on C:".</summary>
+    private string? PackagesHint(RunInfo info, bool packagesOnSystem) =>
+        _packageVariable is null ? null : $"{_packageVariable} on {(packagesOnSystem ? info.SystemDrive.Letter : info.DevDrive.Letter)}";
+
     private string Text(double? value) => value is double v ? Fmt.Value(v, _test.Unit) : "pending";
 
-    private LaneSnapshot Lane(TestState t, DriveRole drive, double? value, double? live, int iterations)
+    private LaneSnapshot Lane(TestState t, DriveRole drive, double? value, double? live, int iterations, string? hint)
     {
-        string? hint = t.ActiveDrive == drive && t.ActivePhase == RunPhase.Setup ? "setup" : null;
+        if (t.ActiveDrive == drive && t.ActivePhase == RunPhase.Setup)
+        {
+            hint = "setup";
+        }
 
         // Mid-series, name the in-flight run so its time isn't read as the summary bar's value.
         string? liveText = live is double l

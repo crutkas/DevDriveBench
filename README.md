@@ -26,17 +26,28 @@ winapp run .
 | `F11` | Full screen (stage mode) |
 
 - **Prepare** does every selected test's one-time setup now (seed clones, package downloads, the
-  eShop restore) and keeps it, so **Run** goes straight to measuring. Rows show progress, then
-  `ready`; the button becomes **✓ Ready**. Runs reuse the prepared fixtures until something that
-  shapes them changes (tests, git fixture size, a tool version), and then Prepare shows again.
-  Run without Prepare still works and prepares as it goes. Prepared fixtures are deleted
-  when the app closes, or from the gear menu.
+  eShop restore), stages the package caches on both drives, and keeps it all, so **Run** goes
+  straight to measuring. Rows show progress, then `ready`; the button becomes **✓ Ready**. Runs
+  reuse the prepared fixtures until something that shapes them changes (tests, git fixture size, a
+  tool version, the drives), and then Prepare shows again. Run without Prepare still works and
+  prepares as it goes. Prepared fixtures are deleted when the app closes, or from the gear menu.
+- **Packages** (Optimal drive | C drive) picks where package caches live. **Optimal drive** (default)
+  just happens: each drive's run uses package caches on that drive, so C: is at its best on C: and
+  the Dev Drive at its best on the Dev Drive. **C drive** keeps the Dev Drive run's packages on C:
+  ("moved the code, not the packages"). The toggle sets `npm_config_cache`, `NUGET_PACKAGES` (plus
+  NuGet's HTTP, plugins and scratch paths) and `CARGO_HOME` for the benchmark's own child processes
+  only; your account and machine environment variables are never changed. Each row names the variable
+  and drive next to its lane. Run once on **C drive**, flip to **Optimal drive**, and run again: the
+  rows then show all three scenarios top to bottom (everything on C:, code on the Dev Drive with
+  packages on C:, everything on the Dev Drive), and the headline and each row add the other run's
+  advantage.
 - **Live** runs the benchmark on this machine. **Runs** (default 1) is iterations per drive per test;
   raise it to gather steadier data.
 - **Replay** plays a recorded run back at its original pace (1×, or 2–8× to skip ahead). Use it
   if the stage machine has no Dev Drive, no network, or no time. The app ships a real recorded
   sample; every Live run you make is added to the list. A run recorded after Prepare carries its
-  preparation, so Replay has the same Prepare → Run flow.
+  preparation, so Replay has the same Prepare → Run flow, and a run recorded after one with the
+  packages on the other drive carries that comparison.
 - The gear menu picks tests, the git fixture size, and the Dev Drive (when there are several).
 
 ## What is measured
@@ -45,9 +56,9 @@ winapp run .
 |------|---------------|-------|
 | Disk I/O | 128 MiB sequential write/read (1 MiB blocks), 2,000 random 4K reads/writes at QD1, unbuffered + write-through | — |
 | git clone | `git clone --no-hardlinks` of a local 15,000-file repo (1,200 with Quick) | git |
-| npm ci | offline `npm ci` of microsoft/vscode-eslint from a cold cache on the drive | npm, network for first prep |
-| dotnet build | `dotnet build` of dotnet/eShop on .NET 10 (`eShop.Web.slnf`: web app, services, Aspire AppHost and tests; pinned commit) against a cold NuGet cache on the drive, build servers cold each run | dotnet, network for first prep |
-| cargo build | offline `cargo build` of microsoft/edit from a cold `CARGO_HOME` on the drive | cargo, network for first prep |
+| npm ci | offline `npm ci` of microsoft/vscode-eslint; `node_modules` on the code drive, `npm_config_cache` on the packages drive | npm, network for first prep |
+| dotnet build | `dotnet build` of dotnet/eShop on .NET 10 (`eShop.Web.slnf`: web app, services, Aspire AppHost and tests; pinned commit); output on the code drive, `NUGET_PACKAGES` on the packages drive, build servers cold each run | dotnet, network for first prep |
+| cargo build | offline `cargo build` of microsoft/edit; `target/` on the code drive, `CARGO_HOME` (registry, crate unpacking) on the packages drive | cargo, network for first prep |
 
 Tests whose tool is not installed are unchecked; the gear menu has an **Install** button per test
 that runs `winget install` for what it needs (Git; Node.js LTS; .NET 10 SDK; for cargo, VS 2022
@@ -58,10 +69,16 @@ The app re-reads PATH afterwards, so the test is ready without a restart. A test
 network, low disk) shows as a skipped row with the reason.
 
 **Methodology.** Each test prepares its fixture once (Prepare, or the start of a Run), then runs N
-cold iterations on the system drive and N on the Dev Drive. Every workload iteration re-copies its
-package cache cold onto the drive under test, into fresh folders, right before it is timed, so
-cache, sources, and build output all live on the drive being measured; only the tool invocation
-itself is timed. With N ≥ 2 the first iteration is a discarded warm-up and the median of the rest
+iterations on the system drive and N on the Dev Drive. Each iteration copies the source into a fresh
+folder on the drive under test right before it is timed; only the tool invocation itself is timed.
+Package caches are staged at Prepare, like a machine's long-lived caches, with a separate copy for
+each scenario (C: for the system-drive run, and C: and D: for the Dev Drive run), so no scenario
+reads a cache another one has already warmed. Caches a run can change (cargo unpacks crates into
+`CARGO_HOME`; npm writes logs into its cache) are re-staged from the seed after every run, once the
+result is on screen, so every run starts from the same contents. The eShop NuGet cache is only
+read (the untimed offline restore finds every package already there, and the SDK's background
+workload-update check is turned off for the benchmark's processes), so it stays as staged.
+With N ≥ 2 the first iteration is a discarded warm-up and the median of the rest
 is reported (ticks on each lane show every raw run; the dim tick is the warm-up). With N = 1 that
 single run is reported. Build servers are shut down before every timed `dotnet build` (untimed,
 while that iteration's files are copied), so the second drive never inherits warm MSBuild/compiler
@@ -81,19 +98,21 @@ Every Live run is saved to `Documents\DevDriveBench\Runs`:
   Drive/trusted, bus, VHDX backing file), `fsutil devdrv query` output, plan, each tool's version
   and the architecture of the binary that really runs (git's own `git.exe`, `node.exe` behind
   `npm.cmd`, the toolchain's `cargo.exe` behind rustup's proxy), every timestamped event (phases,
-  raw per-iteration values, live disk samples, 4 Hz disk/CPU activity), a results summary and, for a
-  run made after Prepare, the preparation's own events. This
+  raw per-iteration values, live disk samples, 4 Hz disk/CPU activity), where the Dev Drive run's
+  packages lived, a results summary, and, for a run made after Prepare, the preparation's own events
+  (plus, after a run with the packages on the other drive, that run's results). This
   is what Replay plays. A tool whose architecture doesn't match the OS (e.g. x64 node on ARM64) is
   flagged next to its row.
 - `*.csv` — one row per raw iteration (`test_id, drive_role, iteration, value, discarded,
-  reported_value, advantage, tool, tool_version, tool_arch, os_arch`, plus machine and drive
-  context) for spreadsheets.
+  reported_value, advantage, tool, tool_version, tool_arch, os_arch, package_var, packages_drive`,
+  plus machine and drive context) for spreadsheets.
 
 Headless data gathering uses the same engine and produces the same files:
 
 ```powershell
 dotnet run --project src\DevDriveBench.Cli -- --runs 5 --tests disk,git-clone
 dotnet run --project src\DevDriveBench.Cli -- --prepare   # stage flow: prepare, then run; prints dead time between timed steps
+dotnet run --project src\DevDriveBench.Cli -- --prepare --packages both   # C drive, then optimal drive; prints all three scenarios
 dotnet run --project src\DevDriveBench.Cli -- --timing <recording.json>   # same dead-time report for any saved run
 dotnet run --project src\DevDriveBench.Cli -- --list      # drives, Dev Drive status, tools + architecture
 ```

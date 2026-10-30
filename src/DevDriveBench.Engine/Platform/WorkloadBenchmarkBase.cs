@@ -7,14 +7,16 @@ namespace DevDriveBench.Engine.Platform;
 
 /// <summary>
 /// Shared scaffolding for the real-workload benchmarks: bounded temp fixtures, a per-drive working
-/// area, a per-drive package-cache directory (re-populated cold each iteration), and robust cleanup.
+/// area, package caches staged per drive at Prepare (re-staged after each run), and robust cleanup.
 /// </summary>
 /// <remarks>
 /// <para><b>SAFETY:</b> every directory the benchmark creates is tracked and deleted in
 /// <see cref="Cleanup"/> (called from the orchestrator's <c>finally</c>), and each measured iteration
 /// deletes its own working copy. Fixtures are small and a free-space guard skips the benchmark when a
 /// drive is low. No machine-config, env-var, or partition/format changes are ever made — only files
-/// under the seed (<c>%TEMP%</c>) and per-drive <c>DevDriveBench.Workload</c> folders.</para>
+/// under the seed (<c>%TEMP%</c>) and per-drive <c>DevDriveBench.Workload</c> / <c>DevDriveBench.Packages</c>
+/// folders. Package locations reach the tools only through environment variables on the benchmark's
+/// own child processes; the user's and machine's variables are never changed.</para>
 /// <para><b>F9 (ownership):</b> a per-drive bench <c>&lt;Slug&gt;</c> folder is only ever deleted
 /// wholesale when this benchmark created it (stamping a <see cref="BenchOwnershipMarkerFileName"/>
 /// receipt) or a prior run left that receipt. A predictable pre-existing bench folder that lacks the
@@ -34,6 +36,11 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
     private readonly HashSet<string> _seedParents = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _driveParents = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _trackGate = new();
+
+    // Staged package caches that are complete copies of the seed, and the (packages|code) pairs runs
+    // have read since the last RefreshPackages.
+    private readonly HashSet<string> _staged = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _used = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// F9: small ownership receipt dropped into a per-drive bench <c>&lt;Slug&gt;</c> directory this
@@ -96,18 +103,149 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         Track(SeedDirectory, seed: true);
 
         PrepareCore(environment, cancellationToken);
+        StagePackages(environment, cancellationToken);
+    }
+
+    /// <summary>
+    /// The warm package cache this workload's runs read (set by <see cref="PrepareCore"/>), or null when
+    /// the workload has none. It is staged onto the drives at Prepare and re-staged after each run.
+    /// </summary>
+    protected virtual string? PackageSeed => null;
+
+    /// <summary>Directory names inside <see cref="PackageSeed"/> that runs never read (left out of staged copies).</summary>
+    protected virtual bool SkipWhenStaging(string directoryName) => false;
+
+    /// <summary>
+    /// True when a run can change the staged cache (e.g. cargo unpacks crates into <c>CARGO_HOME</c>), so it
+    /// is re-staged after every run that used it. Workloads whose runs only read the cache return false:
+    /// their caches stay as staged at Prepare, like a machine's long-lived package cache, and nothing is
+    /// rewritten between runs.
+    /// </summary>
+    protected virtual bool RunsWritePackages => true;
+
+    /// <summary>
+    /// The staged package cache for code on <paramref name="codeRoot"/> with packages on
+    /// <paramref name="packagesRoot"/>, e.g. <c>C:\DevDriveBench.Packages\npm-ci\for-D</c>.
+    /// </summary>
+    protected string PackageSlot(string packagesRoot, string codeRoot) =>
+        Path.Combine(packagesRoot, WorkloadPaths.PackagesFolderName, Slug, "for-" + RootName(codeRoot));
+
+    /// <summary>
+    /// Stages the package cache for every pair a run can use: the system-drive run (packages on the
+    /// system drive) and the Dev Drive run with packages on either drive. Each pair gets its own copy,
+    /// so no run reads a cache another scenario has already warmed.
+    /// </summary>
+    private void StagePackages(WorkloadEnvironment environment, CancellationToken cancellationToken)
+    {
+        if (PackageSeed is null)
+        {
+            return;
+        }
+
+        var pairs = new[]
+        {
+            (Code: environment.SystemRoot, Packages: environment.SystemRoot),
+            (Code: environment.DevRoot, Packages: environment.SystemRoot),
+            (Code: environment.DevRoot, Packages: environment.DevRoot),
+        };
+        StageSlots(pairs.Distinct().Select(p => (p.Packages, p.Code)).ToArray(), cancellationToken);
+    }
+
+    /// <summary>
+    /// (Re)creates staged caches from the seed: ownership is claimed one at a time, then the copies run in
+    /// parallel (the slots are independent trees). Throws on failure, leaving the failed slots unstaged.
+    /// </summary>
+    private void StageSlots(IReadOnlyList<(string PackagesRoot, string CodeRoot)> pairs, CancellationToken cancellationToken)
+    {
+        string seed = PackageSeed ?? throw new InvalidOperationException("no package seed");
+        string[] slots = pairs.Select(p => ClaimSlot(p.PackagesRoot, p.CodeRoot)).ToArray();
+        Parallel.ForEach(slots, new ParallelOptions { CancellationToken = cancellationToken }, slot =>
+        {
+            ResetDirectory(slot);
+            CopyDirectory(seed, slot, SkipWhenStaging);
+            lock (_trackGate)
+            {
+                _staged.Add(slot);
+            }
+        });
+    }
+
+    /// <summary>Marks a slot unstaged and records its folders for cleanup (same ownership rules as the bench folders).</summary>
+    private string ClaimSlot(string packagesRoot, string codeRoot)
+    {
+        string top = Path.Combine(packagesRoot, WorkloadPaths.PackagesFolderName);
+        string slugDir = Path.Combine(top, Slug);
+        string slot = PackageSlot(packagesRoot, codeRoot);
+
+        TrackParent(top, seed: true);
+        if (TryClaimOwnedDirectory(slugDir))
+        {
+            Track(slugDir, seed: true);
+        }
+        else
+        {
+            TrackParent(slugDir, seed: true);
+            Track(slot, seed: true);
+        }
+
+        lock (_trackGate)
+        {
+            _staged.Remove(slot);
+        }
+
+        return slot;
+    }
+
+    /// <inheritdoc />
+    public void RefreshPackages()
+    {
+        (string PackagesRoot, string CodeRoot)[] used;
+        lock (_trackGate)
+        {
+            used = _used.Select(k => k.Split('|')).Select(p => (p[0], p[1])).ToArray();
+            _used.Clear();
+        }
+
+        if (used.Length == 0 || PackageSeed is not string seed || !Directory.Exists(seed))
+        {
+            return;
+        }
+
+        try
+        {
+            StageSlots(used, CancellationToken.None);
+        }
+        catch
+        {
+            // Whatever didn't finish is left unstaged: its next use stages it (untimed) before measuring.
+            foreach ((string packagesRoot, string codeRoot) in used)
+            {
+                string slot = PackageSlot(packagesRoot, codeRoot);
+                bool staged;
+                lock (_trackGate)
+                {
+                    staged = _staged.Contains(slot);
+                }
+
+                if (!staged)
+                {
+                    DeleteTree(slot);
+                }
+            }
+        }
     }
 
     /// <inheritdoc />
     /// <remarks>
-    /// Nothing is deleted on the critical path: the iteration's working copy and its cold cache are
-    /// fresh, uniquely named directories that are removed by <see cref="CleanupDrives"/> after the run
-    /// (or right away if the drive runs low on space), so consecutive measurements aren't separated by
-    /// tree deletions.
+    /// Nothing is copied into the package cache or deleted on the critical path: the cache is the copy
+    /// staged at Prepare (or re-staged after the last run), and the iteration's working copy is a fresh,
+    /// uniquely named directory removed by <see cref="CleanupDrives"/> after the run (or right away if
+    /// the drive runs low on space).
     /// </remarks>
-    public double MeasureOnce(string driveRoot, CancellationToken cancellationToken)
+    public double MeasureOnce(string driveRoot, string packagesRoot, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(driveRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(packagesRoot);
         cancellationToken.ThrowIfCancellationRequested();
 
         string benchTop = Path.Combine(driveRoot, WorkloadPaths.BenchFolderName);
@@ -126,14 +264,8 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         // sub-directories we create under it (each iteration's cache + run dir).
         bool ownsBenchRoot = TryClaimOwnedDirectory(benchRoot);
 
-        // The per-drive package-cache directory. It lives on the SAME drive under test so every timed
-        // run is the honest "everything on this drive" case (cache + source + build output co-located).
-        // Every iteration gets a NEW directory populated cold from the warm seed (see MeasureCore /
-        // PopulateColdCache), so a measured run is a realistic COLD first-build rather than a warm
-        // steady-state iteration.
-        string id = Guid.NewGuid().ToString("N");
-        string cacheDir = Path.Combine(benchRoot, "cache-" + id);
-        string workDir = Path.Combine(benchRoot, "run-" + id);
+        // Each iteration's code and build output go in a NEW directory on the drive under test.
+        string workDir = Path.Combine(benchRoot, "run-" + Guid.NewGuid().ToString("N"));
 
         // F11: benchTop is shared by sibling benchmarks, so it is a FIXED PARENT we never delete wholesale
         // (removed only if empty).
@@ -147,13 +279,47 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
             // F9: foreign pre-existing bench dir — never recurse-delete it. Remove it only if it becomes
             // empty, and wholesale-delete only the sub-directories we own under it.
             TrackParent(benchRoot, seed: false);
-            Track(cacheDir, seed: false);
             Track(workDir, seed: false);
         }
 
-        Directory.CreateDirectory(cacheDir);
         Directory.CreateDirectory(workDir);
+        string cacheDir = PackageSeed is null ? string.Empty : StagedCache(packagesRoot, driveRoot);
         return MeasureCore(driveRoot, workDir, cacheDir, cancellationToken);
+    }
+
+    /// <summary>
+    /// The staged cache for this pair, marked as used so <see cref="RefreshPackages"/> re-stages it after
+    /// the run. Staged now (untimed) only if Prepare's copy is missing.
+    /// </summary>
+    private string StagedCache(string packagesRoot, string codeRoot)
+    {
+        string slot = PackageSlot(packagesRoot, codeRoot);
+        bool staged;
+        lock (_trackGate)
+        {
+            staged = _staged.Contains(slot) && Directory.Exists(slot);
+        }
+
+        if (!staged)
+        {
+            StageSlots(new[] { (packagesRoot, codeRoot) }, CancellationToken.None);
+        }
+
+        if (RunsWritePackages)
+        {
+            lock (_trackGate)
+            {
+                _used.Add(packagesRoot + "|" + codeRoot);
+            }
+        }
+
+        return slot;
+    }
+
+    private static string RootName(string root)
+    {
+        string name = new(Path.GetFullPath(root).Where(char.IsLetterOrDigit).ToArray());
+        return name.Length == 0 ? "root" : name.Length > 40 ? name[^40..] : name;
     }
 
     /// <inheritdoc />
@@ -167,6 +333,12 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
     public void Cleanup()
     {
         ReleaseResources();
+        lock (_trackGate)
+        {
+            _staged.Clear();
+            _used.Clear();
+        }
+
         DeleteTracked(seed: false);
         DeleteTracked(seed: true);
     }
@@ -221,31 +393,13 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
     protected abstract void PrepareCore(WorkloadEnvironment environment, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Runs one timed iteration on <paramref name="driveRoot"/>. <paramref name="workDir"/> is a fresh
-    /// per-iteration directory (deleted afterwards); <paramref name="cacheDir"/> is the per-drive package
-    /// cache directory (on the same drive under test). A workload re-populates <paramref name="cacheDir"/>
-    /// cold from its warm seed at the start of every iteration via <see cref="PopulateColdCache"/>, so a
-    /// measured run is a realistic COLD first-build with cache + source + output all on this drive. Both
-    /// directories are removed at <see cref="Cleanup"/>.
+    /// Runs one timed iteration with code on <paramref name="driveRoot"/>. <paramref name="workDir"/> is a
+    /// fresh per-iteration directory on that drive; <paramref name="cacheDir"/> is the staged package
+    /// cache for this run (on the drive the plan put packages on; empty when the workload has no
+    /// <see cref="PackageSeed"/>). Point the tool at it through its cache environment variable, for the
+    /// child process only. Both are removed at <see cref="Cleanup"/>.
     /// </summary>
     protected abstract double MeasureCore(string driveRoot, string workDir, string cacheDir, CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Freshly (re)populates the per-drive <paramref name="cacheDir"/> with a clean copy of the warm
-    /// <paramref name="seedCache"/>, so the timed build that follows reads a COLD, just-written cache on
-    /// the SAME drive it is testing. This is untimed SETUP — call it at the very start of
-    /// <see cref="MeasureCore"/>, before <see cref="TimeProcess"/>. The reset makes every iteration
-    /// independent (no carry-over warming), and the copy preserves source file timestamps (required by
-    /// tools such as cargo that fingerprint on mtime). Everything lives under the tracked per-drive bench
-    /// root, so it is deleted wholesale at <see cref="Cleanup"/>.
-    /// </summary>
-    protected static void PopulateColdCache(string seedCache, string cacheDir)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(seedCache);
-        ArgumentException.ThrowIfNullOrWhiteSpace(cacheDir);
-        ResetDirectory(cacheDir);
-        CopyDirectory(seedCache, cacheDir);
-    }
 
     /// <summary>Records a directory this benchmark may delete wholesale: with the seed, or with the per-drive run data.</summary>
     private void Track(string directory, bool seed)
@@ -438,7 +592,7 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = workers }, f => File.Copy(f.From, f.To, overwrite: true));
     }
 
-    /// <summary>Robustly deletes a directory tree, clearing read-only attributes (git pack files) and retrying once. Never throws.</summary>
+    /// <summary>Robustly deletes a directory tree, clearing read-only attributes (git pack files) only if a plain delete fails, then retrying once. Never throws.</summary>
     protected static void DeleteTree(string directory)
     {
         if (string.IsNullOrEmpty(directory))
@@ -455,7 +609,12 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
                     return;
                 }
 
-                ClearReadOnly(directory);
+                // Clearing attributes walks every file, so pay for it only when a plain delete hit one.
+                if (attempt > 0)
+                {
+                    ClearReadOnly(directory);
+                }
+
                 Directory.Delete(directory, recursive: true);
                 return;
             }

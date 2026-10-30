@@ -20,6 +20,13 @@ public sealed record BenchPlan
 
     /// <summary>Groups to run (see <see cref="TestCatalog.GroupOrder"/>); null runs every available group.</summary>
     public IReadOnlyCollection<string>? Groups { get; init; }
+
+    /// <summary>Where the Dev Drive run reads package caches from (the system-drive run always uses the system drive).</summary>
+    public PackageLocation Packages { get; init; } = PackageLocation.DevDrive;
+
+    /// <summary>The drive root holding packages for a run whose code is on <paramref name="role"/>'s drive.</summary>
+    public string PackagesRoot(DriveRole role) =>
+        role == DriveRole.Dev && Packages == PackageLocation.DevDrive ? DevDrive.Root : SystemDrive.Root;
 }
 
 /// <summary>
@@ -122,6 +129,7 @@ public sealed class BenchRunner
                 ToolArchitecture = tool.Architecture,
                 Available = tool.Found,
                 UnavailableReason = tool.Found ? null : tool.Path is null ? $"{workload.RequiredTool} not installed" : $"{workload.RequiredTool} installed but not runnable",
+                PackageVariable = TestCatalog.PackageVariable(group),
             });
         }
 
@@ -155,14 +163,16 @@ public sealed class BenchRunner
     }
 
     /// <summary>
-    /// Identity of a prepared fixture: the tool that built it and, for git, the fixture size. Anything
-    /// else (drives, iterations) doesn't change the seed, so it doesn't invalidate a preparation.
+    /// Identity of a prepared fixture: the tool that built it, for git the fixture size, and for workloads
+    /// with a package cache the drives it is staged on. Iterations and the package location don't change
+    /// what is prepared (every location is staged), so they don't invalidate a preparation.
     /// </summary>
-    public static string PrepareKey(TestDescriptor test, WorkloadProfile profile) =>
-        $"{test.ToolVersion}|{test.ToolBinary}|{(test.Group == TestCatalog.GitClone ? profile.ToString() : string.Empty)}";
+    public static string PrepareKey(TestDescriptor test, WorkloadProfile profile, string systemRoot, string devRoot) =>
+        $"{test.ToolVersion}|{test.ToolBinary}|{(test.Group == TestCatalog.GitClone ? profile.ToString() : string.Empty)}|" +
+        (test.PackageVariable is null ? string.Empty : $"{systemRoot.ToUpperInvariant()}|{devRoot.ToUpperInvariant()}");
 
-    /// <summary>True when <paramref name="test"/>'s fixture is prepared for this tool and profile (disk tests need none).</summary>
-    public bool IsPrepared(TestDescriptor test, WorkloadProfile profile)
+    /// <summary>True when <paramref name="test"/>'s fixture is prepared for this tool, profile and drives (disk tests need none).</summary>
+    public bool IsPrepared(TestDescriptor test, WorkloadProfile profile, string systemRoot, string devRoot)
     {
         if (!test.IsWorkload)
         {
@@ -171,9 +181,12 @@ public sealed class BenchRunner
 
         lock (_preparedGate)
         {
-            return _prepared.TryGetValue(test.Group, out string? key) && key == PrepareKey(test, profile);
+            return _prepared.TryGetValue(test.Group, out string? key) && key == PrepareKey(test, profile, systemRoot, devRoot);
         }
     }
+
+    private bool IsPrepared(TestDescriptor test, BenchPlan plan) =>
+        IsPrepared(test, plan.Profile, plan.SystemDrive.Root, plan.DevDrive.Root);
 
     /// <summary>True when any prepared seed is being kept (so it must be released on exit).</summary>
     public bool HasPreparedSeeds
@@ -250,7 +263,8 @@ public sealed class BenchRunner
             Tests = tests,
             DevDriveFilterInfo = _filterInfo(plan.DevDrive.Root),
             Session = kind,
-            PreparedAhead = kind == SessionKind.Run && tests.Any(t => t.IsWorkload && t.Available && IsPrepared(t, plan.Profile)),
+            PreparedAhead = kind == SessionKind.Run && tests.Any(t => t.IsWorkload && t.Available && IsPrepared(t, plan)),
+            Packages = plan.Packages,
         };
 
         _clock.Restart();
@@ -325,18 +339,36 @@ public sealed class BenchRunner
         Emit(new RunCompletedEvent(outcome, error));
         _clock.Stop();
 
-        // Off the measured path: delete what the run wrote on the drives (working copies, per-iteration
-        // caches). Seeds stay for the next run until ReleasePrepared. (Prepare writes nothing there.)
-        foreach (IWorkloadBenchmark benchmark in kind == SessionKind.Run ? touched : new List<IWorkloadBenchmark>())
+        // Off the measured path: re-stage the package caches the run read (in parallel; they are independent
+        // trees) while deleting what it wrote on the drives (working copies), so the next run starts from
+        // freshly staged caches. Seeds stay for the next run until ReleasePrepared. (Prepare writes nothing there.)
+        if (kind == SessionKind.Run && touched.Count > 0)
         {
-            try
+            Task restage = Task.Run(() => Parallel.ForEach(touched, benchmark =>
             {
-                benchmark.CleanupDrives();
-            }
-            catch
+                try
+                {
+                    benchmark.RefreshPackages();
+                }
+                catch
+                {
+                    // Best-effort by contract.
+                }
+            }));
+
+            foreach (IWorkloadBenchmark benchmark in touched)
             {
-                // Best-effort by contract.
+                try
+                {
+                    benchmark.CleanupDrives();
+                }
+                catch
+                {
+                    // Best-effort by contract.
+                }
             }
+
+            restage.Wait();
         }
 
         BenchEvent[] snapshot;
@@ -357,7 +389,7 @@ public sealed class BenchRunner
             return;
         }
 
-        if (IsPrepared(test, plan.Profile))
+        if (IsPrepared(test, plan))
         {
             emit(new TestPreparedEvent(test.Id, 0, Reused: true));
             return;
@@ -390,7 +422,7 @@ public sealed class BenchRunner
     private void EnsurePrepared(TestDescriptor test, IWorkloadBenchmark benchmark, BenchPlan plan, WorkloadEnvironment environment, Action<BenchEvent> emit, CancellationToken ct)
     {
         benchmark.Profile = plan.Profile;
-        if (IsPrepared(test, plan.Profile))
+        if (IsPrepared(test, plan))
         {
             return;
         }
@@ -409,7 +441,7 @@ public sealed class BenchRunner
 
         lock (_preparedGate)
         {
-            _prepared[test.Group] = PrepareKey(test, plan.Profile);
+            _prepared[test.Group] = PrepareKey(test, plan.Profile, plan.SystemDrive.Root, plan.DevDrive.Root);
         }
     }
 
@@ -455,7 +487,7 @@ public sealed class BenchRunner
                         reported = true;
                         emit(new MeasurementEvent(test.Id, role, iteration, Math.Round(seconds, 4)));
                     };
-                    double measured = benchmark.MeasureOnce(root, ct);
+                    double measured = benchmark.MeasureOnce(root, plan.PackagesRoot(role), ct);
                     if (!reported)
                     {
                         emit(new MeasurementEvent(test.Id, role, iteration, Math.Round(measured, 4)));

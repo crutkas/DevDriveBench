@@ -85,7 +85,8 @@ public sealed class RecordingItem
             string headline = s.Headline is double h ? $" · {h.ToString("0.0", CultureInfo.CurrentCulture)}×" : string.Empty;
             string tag = s.IsBundled ? "sample · " : string.Empty;
             string outcome = s.Outcome == RunOutcome.Completed ? string.Empty : $" · {s.Outcome.ToString().ToLowerInvariant()}";
-            return $"{tag}{when} · {s.Machine} · {s.SystemDrive} vs {s.DevDrive} · {s.Iterations}×run{headline}{outcome}";
+            string packages = s.Packages == PackageLocation.SystemDrive ? $" · pkgs {s.SystemDrive}" : " · pkgs optimal";
+            return $"{tag}{when} · {s.Machine} · {s.SystemDrive} vs {s.DevDrive}{packages} · {s.Iterations}×run{headline}{outcome}";
         }
     }
 
@@ -115,6 +116,10 @@ public sealed partial class MainViewModel : ObservableObject
     private RunRecording? _selectedPreparation;
     private string? _replayPreparedPath;
     private bool _replayingPreparation;
+
+    // This session's latest completed live run for each package location, paired for comparison.
+    private readonly Dictionary<PackageLocation, RunRecording> _lastLive = new();
+    private DateTime _sessionStartedAt;
 
     public MainViewModel(DispatcherQueue dispatcher)
     {
@@ -197,11 +202,35 @@ public sealed partial class MainViewModel : ObservableObject
     public partial int ReplaySpeedIndex { get; set; }
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanRun), nameof(HasDevDrive), nameof(CanPrepare))]
+    [NotifyPropertyChangedFor(nameof(CanRun), nameof(HasDevDrive), nameof(CanPrepare), nameof(DevLetter))]
     public partial DriveDescriptor? DevDrive { get; set; }
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SystemLetter))]
     public partial DriveDescriptor? SystemDrive { get; set; }
+
+    /// <summary>
+    /// Optimal drive (default): every run's package caches are on its own drive. C drive: the Dev Drive
+    /// run reads them from the system drive ("moved the code, not the packages"). Applied through
+    /// <c>npm_config_cache</c>, <c>NUGET_PACKAGES</c> and <c>CARGO_HOME</c> on the benchmark's own child
+    /// processes only; the user's and machine's environment variables are never changed.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Packages))]
+    public partial bool PackagesOnOptimalDrive { get; set; } = true;
+
+    public PackageLocation Packages => PackagesOnOptimalDrive ? PackageLocation.DevDrive : PackageLocation.SystemDrive;
+
+    public string SystemLetter => SystemDrive?.Letter ?? "C:";
+
+    public string DevLetter => DevDrive?.Letter ?? "Dev Drive";
+
+    /// <summary>
+    /// The latest run with the packages on the other drive (same drives), shown next to the current one:
+    /// from this session's live runs, or embedded in the replayed recording.
+    /// </summary>
+    [ObservableProperty]
+    public partial ComparisonRun? Comparison { get; set; }
 
     /// <summary>One short line under the rows: where the data went, or what is being replayed.</summary>
     [ObservableProperty]
@@ -333,6 +362,14 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    partial void OnPackagesOnOptimalDriveChanged(bool value)
+    {
+        if (!IsRunning && !IsShowingReplay)
+        {
+            ShowPreview();
+        }
+    }
+
     partial void OnIterationsChanged(double value)
     {
         if (double.IsNaN(value) || value < 1)
@@ -376,7 +413,8 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (IsRunning)
         {
-            if (!IsFinishing)
+            // A double-click on Run must not stop the run it just started.
+            if (!IsFinishing && DateTime.UtcNow - _sessionStartedAt >= TimeSpan.FromSeconds(1))
             {
                 Stop();
             }
@@ -507,6 +545,7 @@ public sealed partial class MainViewModel : ObservableObject
             Iterations = (int)Iterations,
             Profile = IsThorough ? WorkloadProfile.Thorough : WorkloadProfile.Quick,
             Groups = Tests.Where(t => t.IsSelected && t.IsAvailable).Select(t => t.Group).ToArray(),
+            Packages = Packages,
         };
 
         IReadOnlyList<TestDescriptor> tests = DescribeFor(plan.Profile);
@@ -514,6 +553,7 @@ public sealed partial class MainViewModel : ObservableObject
         _isLiveSession = true;
         _replay = null;
         IsShowingReplay = false;
+        _sessionStartedAt = DateTime.UtcNow;
         IsRunning = true;
         LastSavedPath = null;
         FooterText = kind == SessionKind.Prepare ? "Preparing fixtures" : "Recording";
@@ -548,15 +588,28 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             int prepared = recording.Events.OfType<TestPreparedEvent>().Count(e => !e.TestId.StartsWith(TestCatalog.DiskGroup, StringComparison.Ordinal));
-            FooterText = recording.Outcome == RunOutcome.Completed
-                ? $"Prepared {prepared} workload{(prepared == 1 ? string.Empty : "s")} in {Fmt(recording.DurationSeconds)} · Run measures straight away · fixtures are deleted when the app closes"
-                : "Preparation stopped";
+            FooterText = recording.Outcome switch
+            {
+                RunOutcome.Completed => $"Prepared {prepared} workload{(prepared == 1 ? string.Empty : "s")} in {Fmt(recording.DurationSeconds)} · packages staged on {SystemLetter} and {DevLetter} · Run measures straight away · fixtures are deleted when the app closes",
+                RunOutcome.Failed => "Preparation failed · " + recording.Events.OfType<RunCompletedEvent>().LastOrDefault()?.Error,
+                _ => "Preparation stopped",
+            };
             return;
         }
 
         if (recording.Info.PreparedAhead && _lastPreparation is not null)
         {
             recording = recording with { Preparation = _lastPreparation };
+        }
+
+        if (Comparison is not null)
+        {
+            recording = recording with { Comparison = Comparison };
+        }
+
+        if (recording.Outcome == RunOutcome.Completed)
+        {
+            _lastLive[recording.Info.Packages] = recording;
         }
 
         try
@@ -601,8 +654,10 @@ public sealed partial class MainViewModel : ObservableObject
         _replayOffset = 0;
         _isLiveSession = false;
         IsShowingReplay = true;
+        Comparison = recording.Comparison;
         FooterText = ReplayFooter(recording.Info);
         ResetState();
+        _sessionStartedAt = DateTime.UtcNow;
         IsRunning = true;
         _replayClock.Restart();
         Pump();
@@ -650,6 +705,7 @@ public sealed partial class MainViewModel : ObservableObject
         IsShowingReplay = false;
         RunInfo? info = null;
         _selectedPreparation = null;
+        ComparisonRun? comparison = null;
         if (IsReplayMode)
         {
             if (SelectedRecording is not null)
@@ -659,6 +715,7 @@ public sealed partial class MainViewModel : ObservableObject
                     RunRecording r = RecordingStore.Load(SelectedRecording.Summary.Path);
                     info = r.Info;
                     _selectedPreparation = r.Preparation;
+                    comparison = r.Comparison;
                     IsShowingReplay = true;
                     FooterText = ReplayFooter(r.Info);
                 }
@@ -680,7 +737,14 @@ public sealed partial class MainViewModel : ObservableObject
                 Profile = profile,
                 Tests = DescribeFor(profile).Where(t => groups.Contains(t.Group)).ToArray(),
                 Machine = _machine,
+                Packages = Packages,
             };
+            PackageLocation other = info.Packages == PackageLocation.DevDrive ? PackageLocation.SystemDrive : PackageLocation.DevDrive;
+            if (_lastLive.TryGetValue(other, out RunRecording? earlier) && ComparisonRun.Pairs(info, earlier.Info))
+            {
+                comparison = ComparisonRun.From(earlier);
+            }
+
             FooterText = LastSavedPath is null ? $"Runs are saved to {RecordingStore.DefaultDirectory}" : $"Saved  {Path.GetFileName(LastSavedPath)}  +  .csv";
         }
         else
@@ -688,6 +752,7 @@ public sealed partial class MainViewModel : ObservableObject
             FooterText = "No Dev Drive found · use Replay";
         }
 
+        Comparison = comparison;
         ResetState();
         if (info is not null)
         {
@@ -713,7 +778,7 @@ public sealed partial class MainViewModel : ObservableObject
             var groups = new HashSet<string>(Tests.Where(t => t.IsSelected && t.IsAvailable).Select(t => t.Group));
             TestDescriptor[] workloads = _described.Where(d => d.IsWorkload && d.Available && groups.Contains(d.Group)).ToArray();
             // Nothing to prepare (disk passes only) counts as ready: Run measures straight away.
-            IsPrepared = workloads.All(d => _runner.IsPrepared(d, profile));
+            IsPrepared = workloads.All(d => _runner.IsPrepared(d, profile, SystemDrive?.Root ?? string.Empty, DevDrive?.Root ?? string.Empty));
         }
 
         OnPropertyChanged(nameof(CanPrepare));

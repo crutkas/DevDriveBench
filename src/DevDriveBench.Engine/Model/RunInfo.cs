@@ -108,6 +108,13 @@ public sealed record TestDescriptor
 
     /// <summary>Why <see cref="Available"/> is false.</summary>
     public string? UnavailableReason { get; init; }
+
+    /// <summary>
+    /// The environment variable that places this workload's package cache (<c>npm_config_cache</c>,
+    /// <c>NUGET_PACKAGES</c>, <c>CARGO_HOME</c>), set only for the benchmark's own child processes;
+    /// null when the test has no package cache.
+    /// </summary>
+    public string? PackageVariable { get; init; }
 }
 
 /// <summary>Everything needed to interpret (and replay) a run.</summary>
@@ -144,4 +151,21 @@ public sealed record RunInfo
     /// isn't in this recording's timeline (see <c>RunRecording.Preparation</c>).
     /// </summary>
     public bool PreparedAhead { get; init; }
+
+    /// <summary>
+    /// Where the Dev Drive run's package caches lived (<c>npm_config_cache</c>, <c>NUGET_PACKAGES</c>,
+    /// <c>CARGO_HOME</c>). The system-drive run always uses the system drive. Recordings made before this
+    /// existed kept caches on the drive under test, which is <see cref="PackageLocation.DevDrive"/>.
+    /// </summary>
+    public PackageLocation Packages { get; init; } = PackageLocation.DevDrive;
+}
+
+/// <summary>Which drive holds the package caches for the Dev Drive run.</summary>
+public enum PackageLocation
+{
+    /// <summary>Code and packages both on the Dev Drive.</summary>
+    DevDrive,
+
+    /// <summary>Code on the Dev Drive, packages still on the system drive.</summary>
+    SystemDrive,
 }

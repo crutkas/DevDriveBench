@@ -86,6 +86,18 @@
                     Orientation="Horizontal"
                     Spacing="8"
                     Visibility="{x:Bind ViewModel.IsLiveMode, Mode=OneWay}">
+                    <TextBlock VerticalAlignment="Center" Foreground="{ThemeResource StageTextSecondaryBrush}" Text="Packages" />
+                    <ToggleSwitch
+                        x:Name="PackagesToggle"
+                        MinWidth="0"
+                        Margin="0,0,20,0"
+                        AutomationProperties.AutomationId="PackagesToggle"
+                        AutomationProperties.Name="Packages on the optimal drive"
+                        IsEnabled="{x:Bind ViewModel.IsIdle, Mode=OneWay}"
+                        IsOn="{x:Bind ViewModel.PackagesOnOptimalDrive, Mode=TwoWay}"
+                        OffContent="C drive"
+                        OnContent="Optimal drive"
+                        ToolTipService.ToolTip="Optimal drive: each run's npm_config_cache, NUGET_PACKAGES and CARGO_HOME are on its own drive. C drive: the Dev Drive run reads them from C:. Set for the benchmark's own processes only; your environment variables are not changed." />
                     <TextBlock VerticalAlignment="Center" Foreground="{ThemeResource StageTextSecondaryBrush}" Text="Runs" />
                     <NumberBox
                         x:Name="RunsBox"

@@ -12,13 +12,13 @@ namespace DevDriveBench.Engine.Platform;
 /// <para>The fixture is the actual <c>microsoft/edit</c> source at tag <c>v2.0.0</c> (so the supply
 /// chain is one we own and the result is honest about what it compiles). <see cref="PrepareCore"/> does
 /// the one network step: a shallow <c>git clone</c> of the pinned tag and a <c>cargo fetch</c> that
-/// warms a seed <c>CARGO_HOME</c>. Each measured iteration <b>freshly copies that warm seed
-/// <c>CARGO_HOME</c> onto the drive under test</b> (a cold, just-written per-drive registry cache),
-/// copies the checked-out sources (never <c>target/</c> or <c>.git</c> — cargo needs neither) onto the
-/// same drive, and runs <c>cargo build --offline</c> with <c>CARGO_HOME</c> pointed at the per-drive
-/// cache — so the registry cache, the compile, and the fresh <c>target/</c> all live on the one drive
-/// being measured. The copy preserves crate-file timestamps (cargo fingerprints on mtime), so the build
-/// is a real clean compile, not a no-op.</para>
+/// warms a seed <c>CARGO_HOME</c>, which is then staged onto the drives (see
+/// <see cref="WorkloadBenchmarkBase"/>). Each measured iteration copies the checked-out sources (never
+/// <c>target/</c> or <c>.git</c> — cargo needs neither) onto the drive under test and runs
+/// <c>cargo build --offline</c> with <c>CARGO_HOME</c> pointed at the staged cache on the drive the
+/// plan chose, so the fresh <c>target/</c> is on the code drive and the registry reads (and crate
+/// unpacking) are on the packages drive. The staged copy preserves crate-file timestamps (cargo
+/// fingerprints on mtime), so the build is a real clean compile, not a no-op.</para>
 /// <para>The project builds on <b>stable</b> Rust (the nightly <c>build-std</c> config is opt-in via
 /// <c>--config</c> and is deliberately not used). The <see cref="WorkloadProfile"/> only affects the
 /// honest <see cref="Detail"/> wording; the fixture is the real project either way.</para>
@@ -54,8 +54,8 @@ public sealed class CargoBuildWorkload : WorkloadBenchmarkBase
 
     /// <inheritdoc />
     public override string Detail => IsThorough
-        ? $"microsoft/edit (Rust console editor) {RepoTag} \u00B7 cargo build \u00B7 cold cache on the test drive \u00B7 offline (Thorough)"
-        : $"microsoft/edit (Rust console editor) {RepoTag} \u00B7 cargo build \u00B7 cold cache on the test drive \u00B7 offline (Quick)";
+        ? $"microsoft/edit (Rust console editor) {RepoTag} \u00B7 cargo build \u00B7 CARGO_HOME staged at Prepare \u00B7 offline (Thorough)"
+        : $"microsoft/edit (Rust console editor) {RepoTag} \u00B7 cargo build \u00B7 CARGO_HOME staged at Prepare \u00B7 offline (Quick)";
 
     /// <inheritdoc />
     public override string RequiredTool => "cargo";
@@ -101,23 +101,22 @@ public sealed class CargoBuildWorkload : WorkloadBenchmarkBase
     /// <inheritdoc />
     protected override double MeasureCore(string driveRoot, string workDir, string cacheDir, CancellationToken cancellationToken)
     {
-        // SETUP (untimed): freshly populate the per-drive CARGO_HOME with a cold copy of the warm seed, so
-        // the timed compile reads a just-written registry cache on the SAME drive under test (not on C:).
-        // CopyDirectory preserves crate-file mtimes, so cargo's fingerprints stay valid and the build is a
-        // genuine clean compile rather than a no-op. (We deliberately do NOT touch the cache's mtimes.)
-        PopulateColdCache(_seedCargoHome, cacheDir);
-
-        // Copy the checked-out sources (+ Cargo.lock) only — never target/ (a clean compile) or .git
-        // (cargo does not need it) — so each iteration churns a fresh target/ on the drive.
+        // SETUP (untimed): copy the checked-out sources (+ Cargo.lock) only — never target/ (a clean
+        // compile) or .git (cargo does not need it) — so each iteration churns a fresh target/ on the
+        // drive. The staged CARGO_HOME keeps the seed's crate-file mtimes (cargo fingerprints on mtime).
         CopyDirectory(_repoSeed, workDir, skipDirectory: name => name is "target" or ".git");
 
-        // Time only the offline compile, with CARGO_HOME pointed at the per-drive cache. The registry
-        // cache, the compile, and the fresh target/ are therefore all on this drive.
+        // Time only the offline compile, with CARGO_HOME (this process only) pointed at the staged cache.
+        // As after a fresh `cargo fetch`, the build unpacks crates into CARGO_HOME\registry\src first;
+        // the cache is re-staged after the run, so every run starts from the same state.
         return TimeProcess(
             new WorkloadProcessRequest("cargo", BuildArguments, workDir, CargoEnvironment(cacheDir), BuildTimeoutMs),
             cancellationToken,
             "cargo build");
     }
+
+    /// <inheritdoc />
+    protected override string? PackageSeed => _seedCargoHome;
 
     private static Dictionary<string, string> CargoEnvironment(string cargoHome) =>
         new(StringComparer.OrdinalIgnoreCase)

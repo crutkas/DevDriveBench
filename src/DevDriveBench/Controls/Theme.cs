@@ -45,6 +45,9 @@ public static class Theme
 
     public static Brush DevDriveLive => Brush("DevDriveLiveBrush");
 
+    /// <summary>Code on the Dev Drive with packages still on the system drive.</summary>
+    public static Brush DevDriveMixed => Brush("DevDriveMixedBrush");
+
     public static Brush Prepare => Brush("PrepareBrush");
 
     public static FontFamily NumberFont { get; } = new("Segoe UI Variable Display");

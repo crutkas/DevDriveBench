@@ -35,6 +35,12 @@ public sealed record RunRecording
     /// </summary>
     public RunRecording? Preparation { get; init; }
 
+    /// <summary>
+    /// The latest comparable run with the packages on the other drive (same drives), shown side by side
+    /// with this one. Its full data is in its own recording.
+    /// </summary>
+    public ComparisonRun? Comparison { get; init; }
+
     /// <summary>Builds a recording by folding <paramref name="events"/>.</summary>
     public static RunRecording FromEvents(IReadOnlyList<BenchEvent> events)
     {
@@ -56,6 +62,40 @@ public sealed record RunRecording
     }
 }
 
+/// <summary>The results of a run with the packages on the other drive, kept next to a run for comparison.</summary>
+public sealed record ComparisonRun
+{
+    public string RunId { get; init; } = string.Empty;
+
+    public DateTimeOffset StartedAt { get; init; }
+
+    /// <summary>Where that run's Dev Drive package caches lived.</summary>
+    public PackageLocation Packages { get; init; }
+
+    public int Iterations { get; init; } = 1;
+
+    public double? Headline { get; init; }
+
+    public IReadOnlyList<TestResult> Results { get; init; } = Array.Empty<TestResult>();
+
+    /// <summary>Summarizes a completed run for side-by-side display.</summary>
+    public static ComparisonRun From(RunRecording run) => new()
+    {
+        RunId = run.Info.RunId,
+        StartedAt = run.Info.StartedAt,
+        Packages = run.Info.Packages,
+        Iterations = run.Info.Iterations,
+        Headline = run.Headline,
+        Results = run.Results,
+    };
+
+    /// <summary>True when <paramref name="run"/> can sit next to <paramref name="current"/>: same drives, other package location.</summary>
+    public static bool Pairs(RunInfo current, RunInfo run) =>
+        run.Packages != current.Packages &&
+        string.Equals(run.SystemDrive.Root, current.SystemDrive.Root, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(run.DevDrive.Root, current.DevDrive.Root, StringComparison.OrdinalIgnoreCase);
+}
+
 /// <summary>Light listing entry for the Replay picker.</summary>
 public sealed record RecordingSummary(
     string Path,
@@ -67,7 +107,8 @@ public sealed record RecordingSummary(
     double DurationSeconds,
     RunOutcome Outcome,
     double? Headline,
-    bool IsBundled);
+    bool IsBundled,
+    PackageLocation Packages = PackageLocation.DevDrive);
 
 /// <summary>Saves and loads recordings: one replayable JSON plus a flat CSV of raw iterations per run.</summary>
 public static class RecordingStore
@@ -120,7 +161,7 @@ public static class RecordingStore
         ArgumentNullException.ThrowIfNull(recording);
         RunInfo info = recording.Info;
         var sb = new StringBuilder();
-        sb.AppendLine("run_started,machine,cpu,os,profile,iterations,test_id,test,unit,better,drive_role,drive,file_system,dev_drive,virtual_disk,iteration,value,discarded,reported_value,advantage,tool,tool_version,tool_arch,os_arch");
+        sb.AppendLine("run_started,machine,cpu,os,profile,iterations,test_id,test,unit,better,drive_role,drive,file_system,dev_drive,virtual_disk,iteration,value,discarded,reported_value,advantage,tool,tool_version,tool_arch,os_arch,package_var,packages_drive");
 
         var byId = recording.Results.ToDictionary(r => r.TestId, StringComparer.OrdinalIgnoreCase);
         foreach (TestDescriptor test in info.Tests)
@@ -135,6 +176,10 @@ public static class RecordingStore
 
             void Write(DriveRole role, DriveDescriptor drive, IReadOnlyList<double> runs, double? reported)
             {
+                // The system-drive run always reads packages from the system drive.
+                string packagesDrive = test.PackageVariable is null
+                    ? string.Empty
+                    : role == DriveRole.System ? info.SystemDrive.Letter : TestCatalog.PackagesLetter(info.Packages, info);
                 for (int i = 0; i < runs.Count; i++)
                 {
                     sb.AppendJoin(',', new[]
@@ -163,6 +208,8 @@ public static class RecordingStore
                         test.ToolVersion ?? string.Empty,
                         test.ToolArchitecture ?? string.Empty,
                         info.Machine.OsArchitecture,
+                        test.PackageVariable ?? string.Empty,
+                        packagesDrive,
                     });
                     sb.AppendLine();
                 }
@@ -199,7 +246,8 @@ public static class RecordingStore
                     r.DurationSeconds,
                     r.Outcome,
                     r.Headline,
-                    bundled));
+                    bundled,
+                    r.Info.Packages));
             }
             catch
             {

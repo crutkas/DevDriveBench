@@ -11,7 +11,7 @@
             </ResourceDictionary.MergedDictionaries>
 
             <!--
-                Stage palette. Two data colors only: slate = system drive, azure = Dev Drive. Everything
+                Stage palette. Two data colors only: slate = system drive, azure = Dev Drive (a slate-azure mix = code on the Dev Drive, packages on the system drive). Everything
                 else is a neutral ramp so the eye goes to data. The app runs dark for projection; Light
                 mirrors Dark on purpose, and High Contrast maps to system colors.
             -->
@@ -27,6 +27,7 @@
                     <SolidColorBrush x:Key="SystemDriveLiveBrush" Color="#3A4350" />
                     <SolidColorBrush x:Key="DevDriveBrush" Color="#38BDFF" />
                     <SolidColorBrush x:Key="DevDriveLiveBrush" Color="#134461" />
+                    <SolidColorBrush x:Key="DevDriveMixedBrush" Color="#5E93B0" />
                     <SolidColorBrush x:Key="PrepareBrush" Color="#262D37" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
@@ -40,6 +41,7 @@
                     <SolidColorBrush x:Key="SystemDriveLiveBrush" Color="#3A4350" />
                     <SolidColorBrush x:Key="DevDriveBrush" Color="#38BDFF" />
                     <SolidColorBrush x:Key="DevDriveLiveBrush" Color="#134461" />
+                    <SolidColorBrush x:Key="DevDriveMixedBrush" Color="#5E93B0" />
                     <SolidColorBrush x:Key="PrepareBrush" Color="#262D37" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="HighContrast">
@@ -53,6 +55,7 @@
                     <SolidColorBrush x:Key="SystemDriveLiveBrush" Color="{ThemeResource SystemColorGrayTextColor}" />
                     <SolidColorBrush x:Key="DevDriveBrush" Color="{ThemeResource SystemColorHighlightColor}" />
                     <SolidColorBrush x:Key="DevDriveLiveBrush" Color="{ThemeResource SystemColorGrayTextColor}" />
+                    <SolidColorBrush x:Key="DevDriveMixedBrush" Color="{ThemeResource SystemColorHighlightColor}" />
                     <SolidColorBrush x:Key="PrepareBrush" Color="{ThemeResource SystemColorGrayTextColor}" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>

@@ -44,6 +44,26 @@ public static class TestCatalog
         _ => string.Empty,
     };
 
+    /// <summary>
+    /// The variable that places a workload's package cache (benchmark child processes only), or null
+    /// for tests without one.
+    /// </summary>
+    public static string? PackageVariable(string id) => id switch
+    {
+        NpmCi => "npm_config_cache",
+        DotnetBuild => "NUGET_PACKAGES",
+        CargoBuild => "CARGO_HOME",
+        _ => null,
+    };
+
+    /// <summary>Short on-screen name for a package location, e.g. "D:" or "C:".</summary>
+    public static string PackagesLetter(PackageLocation packages, RunInfo info) =>
+        packages == PackageLocation.SystemDrive ? info.SystemDrive.Letter : info.DevDrive.Letter;
+
+    /// <summary>The package mode in the app's own words: "optimal drive" or "C drive".</summary>
+    public static string PackagesMode(PackageLocation packages, RunInfo info) =>
+        packages == PackageLocation.SystemDrive ? info.SystemDrive.Letter.TrimEnd(':') + " drive" : "optimal drive";
+
     /// <summary>Display name for a selectable group.</summary>
     public static string GroupName(string group) => group switch
     {

@@ -77,31 +77,44 @@ public interface IWorkloadBenchmark
     string RequiredTool { get; }
 
     /// <summary>
-    /// Seeds the shared, bounded fixture(s) once before measurement. Throw
+    /// Seeds the shared, bounded fixture(s) once before measurement, then stages the workload's package
+    /// cache (if it has one) on the drives: one copy on the system drive for the system-drive run, and
+    /// one each on the system drive and the Dev Drive for the Dev Drive run. Throw
     /// <see cref="WorkloadUnavailableException"/> to skip this benchmark with a reason (e.g. no
     /// network to populate a cache, or insufficient free space).
     /// </summary>
     void Prepare(WorkloadEnvironment environment, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Runs exactly one cold first-build iteration against <paramref name="driveRoot"/> and returns its
-    /// wall-clock seconds. The implementation creates its own bounded working directory under the drive,
-    /// freshly (re)populates its per-drive package cache cold onto that same drive, performs the churn,
-    /// times it, and deletes that working directory. Throw <see cref="WorkloadUnavailableException"/> to
-    /// skip (e.g. the tool failed).
+    /// Runs exactly one cold first-build iteration with its code and output on <paramref name="driveRoot"/>
+    /// and its package cache on <paramref name="packagesRoot"/> (the staged copy for that pair, pointed at
+    /// through the tool's cache environment variable for the child process only), and returns its
+    /// wall-clock seconds. The implementation copies its source into a fresh working directory on the
+    /// drive, times the tool, and leaves deletion for <see cref="CleanupDrives"/>. Throw
+    /// <see cref="WorkloadUnavailableException"/> to skip (e.g. the tool failed).
     /// </summary>
-    double MeasureOnce(string driveRoot, CancellationToken cancellationToken);
+    double MeasureOnce(string driveRoot, string packagesRoot, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Deletes everything the benchmark wrote on the drives under test (working copies, per-iteration
-    /// caches, bench folders) but keeps the prepared seed, so the next run skips <see cref="Prepare"/>.
-    /// Must be safe to call at any time and must never throw.
+    /// Re-stages, from the seed, every package cache a run used and could have changed (e.g. cargo
+    /// unpacks crates into <c>CARGO_HOME</c>), so the next run reads the same cache contents no matter what
+    /// the last one wrote. Caches that runs only read stay as staged at Prepare. Called off the measured
+    /// path, after a run's result is shown. Must never throw (a cache that can't be re-staged is re-staged
+    /// on its next use instead).
+    /// </summary>
+    void RefreshPackages();
+
+    /// <summary>
+    /// Deletes everything the benchmark wrote on the drives under test (working copies, bench folders)
+    /// but keeps the prepared seed and staged package caches, so the next run skips
+    /// <see cref="Prepare"/>. Must be safe to call at any time and must never throw.
     /// </summary>
     void CleanupDrives();
 
     /// <summary>
-    /// Deletes every fixture/working directory the benchmark created, on both drives and the seed
-    /// root. Must be safe to call even if <see cref="Prepare"/> threw, and must never throw.
+    /// Deletes every fixture/working directory the benchmark created, on both drives (including staged
+    /// package caches) and the seed root. Must be safe to call even if <see cref="Prepare"/> threw, and
+    /// must never throw.
     /// </summary>
     void Cleanup();
 }

@@ -176,9 +176,46 @@ public class BenchRunnerTests
         IReadOnlyList<TestDescriptor> newSdk = runner.DescribeTests(WorkloadProfile.Quick)
             .Select(t => t.Group == TestCatalog.DotnetBuild ? t with { ToolVersion = "11.0.100" } : t)
             .ToArray();
-        Assert.False(runner.IsPrepared(newSdk.Single(t => t.Group == TestCatalog.DotnetBuild), WorkloadProfile.Quick));
+        Assert.False(runner.IsPrepared(newSdk.Single(t => t.Group == TestCatalog.DotnetBuild), WorkloadProfile.Quick, Plan.SystemDrive.Root, Plan.DevDrive.Root));
         await runner.RunAsync(plan with { Profile = WorkloadProfile.Quick }, tests: newSdk);
         Assert.Equal(2, dotnet.Prepared);
+    }
+
+    [Fact]
+    public async Task PackageLocationRoutesOnlyTheDevDriveRunsPackages()
+    {
+        var npm = new FakeWorkload("npm", 4, 2);
+        var runner = Create(npm);
+        BenchPlan plan = Plan with { Groups = new[] { TestCatalog.NpmCi } };
+
+        RunRecording onDev = await runner.RunAsync(plan);
+        RunRecording onSystem = await runner.RunAsync(plan with { Packages = PackageLocation.SystemDrive });
+
+        Assert.Equal(new[] { (@"C:\", @"C:\"), (@"D:\", @"D:\"), (@"C:\", @"C:\"), (@"D:\", @"C:\") }, npm.Measured);
+        Assert.Equal(PackageLocation.DevDrive, onDev.Info.Packages);
+        Assert.Equal(PackageLocation.SystemDrive, onSystem.Info.Packages);
+        Assert.Equal("npm_config_cache", onSystem.Info.Tests.Single().PackageVariable);
+
+        // Both locations are staged by one Prepare; every run re-stages what it read, after the result.
+        Assert.Equal(1, npm.Prepared);
+        Assert.Equal(2, npm.Refreshed);
+        Assert.IsType<RunCompletedEvent>(onSystem.Events[^1]);
+    }
+
+    [Fact]
+    public async Task ChangingTheDevDriveInvalidatesStagedPackagesButNotGit()
+    {
+        var git = new FakeWorkload("git", 4, 2);
+        var cargo = new FakeWorkload("cargo", 4, 2);
+        var runner = Create(git, cargo);
+        BenchPlan plan = Plan with { Groups = new[] { TestCatalog.GitClone, TestCatalog.CargoBuild } };
+        await runner.PrepareAsync(plan);
+
+        BenchPlan otherDevDrive = plan with { DevDrive = plan.DevDrive with { Root = @"E:\" } };
+        await runner.RunAsync(otherDevDrive);
+
+        Assert.Equal(1, git.Prepared);
+        Assert.Equal(2, cargo.Prepared);
     }
 
     [Fact]
@@ -312,17 +349,24 @@ public class BenchRunnerTests
             }
         }
 
-        public double MeasureOnce(string driveRoot, CancellationToken cancellationToken)
+        public double MeasureOnce(string driveRoot, string packagesRoot, CancellationToken cancellationToken)
         {
             OnMeasure?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
+            Measured.Add((driveRoot, packagesRoot));
             TimedSectionStarting?.Invoke();
             double value = driveRoot.StartsWith("D", StringComparison.OrdinalIgnoreCase) ? _dev.Dequeue() : _system.Dequeue();
             TimedSectionCompleted?.Invoke(value);
             return value;
         }
 
+        public List<(string Code, string Packages)> Measured { get; } = new();
+
         public int CleanedUpDrives { get; private set; }
+
+        public int Refreshed { get; private set; }
+
+        public void RefreshPackages() => Refreshed++;
 
         public void CleanupDrives() => CleanedUpDrives++;
 

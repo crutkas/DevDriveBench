@@ -19,6 +19,7 @@ public sealed partial class MainPage : Page
     private const double ActivityWindowSeconds = 60;
 
     private readonly Dictionary<string, ComparisonRow> _rows = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, TestResult> _comparison = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<SparkPoint> _io = new();
     private readonly List<SparkPoint> _cpu = new();
     private double _headlineShown;
@@ -155,7 +156,7 @@ public sealed partial class MainPage : Page
             {
                 if (_rows.TryGetValue(t.Id, out ComparisonRow? row))
                 {
-                    row.Render(t, info, now);
+                    row.Render(t, info, now, _comparison.GetValueOrDefault(t.Id));
                 }
             }
         }
@@ -192,14 +193,34 @@ public sealed partial class MainPage : Page
             Set(HeadlineCaption, target >= 1 ? "faster dev workloads on the Dev Drive" : "Dev Drive relative speed on dev workloads");
             int n = state.HeadlineCount;
             int runs = info?.Iterations ?? 1;
-            Set(HeadlineDetail, $"median of {n} workload{(n == 1 ? string.Empty : "s")} · {runs} run{(runs == 1 ? string.Empty : "s")} per drive{(runs >= 2 ? " · warm-up dropped" : string.Empty)}");
+            string detail = $"median of {n} workload{(n == 1 ? string.Empty : "s")} · {runs} run{(runs == 1 ? string.Empty : "s")} per drive{(runs >= 2 ? " · warm-up dropped" : string.Empty)}";
+            if (info is not null && info.Tests.Any(x => x.IsWorkload && x.Group != TestCatalog.GitClone))
+            {
+                detail += $" · packages: {TestCatalog.PackagesMode(info.Packages, info)}";
+                if (ViewModel.Comparison is { Headline: double other } c)
+                {
+                    detail += $"\n{Fmt.Ratio(other)} with packages: {TestCatalog.PackagesMode(c.Packages, info)}";
+                }
+            }
+
+            Set(HeadlineDetail, detail);
         }
         else
         {
             Set(HeadlineText, string.Empty);
             HeadlineText.Foreground = Theme.Tertiary;
             Set(HeadlineCaption, "Dev Drive advantage on dev workloads");
-            Set(HeadlineDetail, info is null ? string.Empty : $"{info.DevDrive.Letter} Dev Drive vs {info.SystemDrive.Letter} system drive · same machine, same tools");
+            string pendingDetail = info is null ? string.Empty : $"{info.DevDrive.Letter} Dev Drive vs {info.SystemDrive.Letter} system drive · same machine, same tools";
+            if (info is not null && info.Tests.Any(x => x.IsWorkload && x.Group != TestCatalog.GitClone))
+            {
+                pendingDetail = $"{info.DevDrive.Letter} Dev Drive vs {info.SystemDrive.Letter} system drive · packages: {TestCatalog.PackagesMode(info.Packages, info)}";
+                if (ViewModel.Comparison is { Headline: double earlier } c)
+                {
+                    pendingDetail += $"\n{Fmt.Ratio(earlier)} with packages: {TestCatalog.PackagesMode(c.Packages, info)}";
+                }
+            }
+
+            Set(HeadlineDetail, pendingDetail);
         }
 
         AutomationSet(HeadlineText, state.Headline is double h ? $"Dev Drive advantage {Fmt.Ratio(h)}" : "No result yet");
@@ -218,9 +239,12 @@ public sealed partial class MainPage : Page
             {
                 int ready = state.Tests.Count(t => t.Descriptor.IsWorkload && t.Status == TestStatus.Ready);
                 int workloads = state.Tests.Count(t => t.Descriptor.IsWorkload);
-                text = outcome == RunOutcome.Completed
-                    ? $"Ready  ·  {(ready == workloads ? $"{ready}" : $"{ready} of {workloads}")} workload{(workloads == 1 ? string.Empty : "s")} prepared in {Fmt.Clock(state.LastEventTime)}  ·  F5 to run"
-                    : $"Preparation stopped  ·  {Fmt.Clock(state.LastEventTime)}";
+                text = outcome switch
+                {
+                    RunOutcome.Completed => $"Ready  ·  {(ready == workloads ? $"{ready}" : $"{ready} of {workloads}")} workload{(workloads == 1 ? string.Empty : "s")} prepared in {Fmt.Clock(state.LastEventTime)}  ·  F5 to run",
+                    RunOutcome.Failed => "Preparation failed  ·  " + state.Error,
+                    _ => $"Preparation stopped  ·  {Fmt.Clock(state.LastEventTime)}",
+                };
             }
             else
             {
@@ -244,11 +268,16 @@ public sealed partial class MainPage : Page
         {
             string letter = p.Drive == DriveRole.Dev ? info.DevDrive.Letter : info.SystemDrive.Letter;
             string run = info.Iterations >= 2 && p.Iteration > 0 ? $"  ·  run {p.Iteration} of {info.Iterations}" : string.Empty;
+
+            // Name the variable that placed this run's packages (benchmark processes only), e.g. "NUGET_PACKAGES on C:".
+            string packages = (t.Descriptor.PackageVariable ?? TestCatalog.PackageVariable(t.Descriptor.Group)) is string variable && t.Descriptor.IsWorkload && p.Drive != DriveRole.None
+                ? $"  ·  {variable} on {(p.Drive == DriveRole.Dev ? TestCatalog.PackagesLetter(info.Packages, info) : info.SystemDrive.Letter)}"
+                : string.Empty;
             text = p.Phase switch
             {
-                RunPhase.Prepare => $"{t.Descriptor.Name}  ·  preparing fixture  ·  {Fmt.Clock(now - p.T)}",
-                RunPhase.Setup => $"{t.Descriptor.Name}  ·  {letter}  ·  cold-cache setup (untimed){run}",
-                RunPhase.Measure => $"{t.Descriptor.Name}  ·  {letter}{run}",
+                RunPhase.Prepare => $"{t.Descriptor.Name}  ·  preparing fixture, staging packages  ·  {Fmt.Clock(now - p.T)}",
+                RunPhase.Setup => $"{t.Descriptor.Name}  ·  {letter}  ·  setup (untimed){run}",
+                RunPhase.Measure => $"{t.Descriptor.Name}  ·  {letter}{packages}{run}",
                 _ => $"{t.Descriptor.Name}  ·  cleanup",
             };
             dot = p.Drive switch { DriveRole.Dev => Theme.DevDrive, DriveRole.System => Theme.SystemDrive, _ => Theme.Secondary };
@@ -383,6 +412,13 @@ public sealed partial class MainPage : Page
             {
                 _dirtyFrames = 60;
             }
+
+            if (property is null or nameof(MainViewModel.Comparison))
+            {
+                _comparison = ViewModel.Comparison?.Results.ToDictionary(r => r.TestId, StringComparer.OrdinalIgnoreCase)
+                    ?? new Dictionary<string, TestResult>(StringComparer.OrdinalIgnoreCase);
+                _dirtyFrames = 60;
+            }
         }
         finally
         {
@@ -451,7 +487,8 @@ public sealed partial class MainPage : Page
 
     private void OnStopAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (ViewModel.IsRunning)
+        // Esc closes an open menu, flyout or dropdown first; it only stops a run when nothing is open.
+        if (ViewModel.IsRunning && VisualTreeHelper.GetOpenPopupsForXamlRoot(XamlRoot).Count == 0)
         {
             ViewModel.RunOrStopCommand.Execute(null);
             args.Handled = true;

@@ -61,8 +61,8 @@ public sealed class NpmCiWorkload : WorkloadBenchmarkBase
 
     /// <inheritdoc />
     public override string Detail => Profile == WorkloadProfile.Thorough
-        ? $"microsoft/vscode-eslint (VS Code ESLint extension) {RepoTag} \u00B7 npm ci \u00B7 cold cache on the test drive \u00B7 offline (Thorough)"
-        : $"microsoft/vscode-eslint (VS Code ESLint extension) {RepoTag} \u00B7 npm ci \u00B7 cold cache on the test drive \u00B7 offline (Quick)";
+        ? $"microsoft/vscode-eslint (VS Code ESLint extension) {RepoTag} \u00B7 npm ci \u00B7 npm_config_cache staged at Prepare \u00B7 offline (Thorough)"
+        : $"microsoft/vscode-eslint (VS Code ESLint extension) {RepoTag} \u00B7 npm ci \u00B7 npm_config_cache staged at Prepare \u00B7 offline (Quick)";
 
     /// <inheritdoc />
     public override string RequiredTool => "npm";
@@ -120,24 +120,23 @@ public sealed class NpmCiWorkload : WorkloadBenchmarkBase
     /// <inheritdoc />
     protected override double MeasureCore(string driveRoot, string workDir, string cacheDir, CancellationToken cancellationToken)
     {
-        // SETUP (untimed): freshly populate the per-drive cache with a cold copy of the warm seed, so the
-        // timed install reads a just-written cache on the SAME drive under test (not a cache on C:).
-        PopulateColdCache(_seedCache, cacheDir);
-
         File.Copy(Path.Combine(_repoSeed, "package.json"), Path.Combine(workDir, "package.json"), overwrite: true);
         File.Copy(Path.Combine(_repoSeed, "package-lock.json"), Path.Combine(workDir, "package-lock.json"), overwrite: true);
 
-        // Time only the offline install, with npm's cache pointed at the per-drive cache. `--ignore-scripts`
-        // skips lifecycle scripts so we time the package install itself (the filesystem-bound work a Dev
-        // Drive accelerates) — vscode-eslint's `postinstall` builds sub-packages and needs the network, so
-        // it both can't run offline and would add unrelated CPU. The cache, the install, and the resulting
-        // node_modules are all on this drive.
+        // Time only the offline install, with npm's cache (npm_config_cache, this process only) pointed at
+        // the staged cache. `--ignore-scripts` skips lifecycle scripts so we time the package install itself
+        // (the filesystem-bound work a Dev Drive accelerates) — vscode-eslint's `postinstall` builds
+        // sub-packages and needs the network, so it both can't run offline and would add unrelated CPU.
+        // node_modules is written on the drive under test.
         return TimeProcess(
-            Cmd($"npm ci --offline --ignore-scripts --no-audit --no-fund --cache \"{cacheDir}\"", workDir),
+            Cmd("npm ci --offline --ignore-scripts --no-audit --no-fund", workDir, environment: new Dictionary<string, string> { ["npm_config_cache"] = cacheDir }),
             cancellationToken,
             "npm ci");
     }
 
-    private static WorkloadProcessRequest Cmd(string commandLine, string workingDirectory, int timeoutMs = TimeoutMs) =>
-        new("cmd.exe", $"/c {commandLine}", workingDirectory, TimeoutMs: timeoutMs);
+    /// <inheritdoc />
+    protected override string? PackageSeed => _seedCache;
+
+    private static WorkloadProcessRequest Cmd(string commandLine, string workingDirectory, int timeoutMs = TimeoutMs, IReadOnlyDictionary<string, string>? environment = null) =>
+        new("cmd.exe", $"/c {commandLine}", workingDirectory, environment, timeoutMs);
 }

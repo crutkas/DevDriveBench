@@ -9,6 +9,9 @@ public enum TestStatus
     Running,
     Done,
     Skipped,
+
+    /// <summary>Fixture prepared ahead and kept; the next Run measures straight away.</summary>
+    Ready,
 }
 
 /// <summary>A contiguous span of a run spent in one phase (for the timeline ribbon).</summary>
@@ -50,6 +53,9 @@ public sealed class TestState
 
     /// <summary>Run time (s) the active phase began.</summary>
     public double ActivePhaseStart { get; internal set; }
+
+    /// <summary>Seconds the fixture took to prepare in a Prepare session (0 when reused or not needed).</summary>
+    public double? PrepareSeconds { get; internal set; }
 
     /// <summary>Reported system value (median after discarding the first when ≥ 2), or null before any run.</summary>
     public double? SystemValue => SystemRuns.Count > 0 ? BenchStats.Representative(SystemRuns) : null;
@@ -196,6 +202,14 @@ public sealed class RunState
 
                 dt.ActivePhase = null;
                 dt.ActiveDrive = DriveRole.None;
+                break;
+
+            case TestPreparedEvent prepared when Find(prepared.TestId) is TestState pr:
+                CloseIfFor(prepared.TestId, prepared.T);
+                pr.Status = TestStatus.Ready;
+                pr.PrepareSeconds = prepared.Seconds;
+                pr.ActivePhase = null;
+                pr.ActiveDrive = DriveRole.None;
                 break;
 
             case MachineActivityEvent activity:

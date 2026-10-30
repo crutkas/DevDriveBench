@@ -44,6 +44,16 @@ public enum RunOutcome
     Failed,
 }
 
+/// <summary>What a recorded session did.</summary>
+public enum SessionKind
+{
+    /// <summary>Measured the tests (preparing any workload that wasn't prepared ahead).</summary>
+    Run,
+
+    /// <summary>Only prepared fixtures ahead of time, so a following Run goes straight to measuring.</summary>
+    Prepare,
+}
+
 /// <summary>
 /// One timestamped fact in a run. The same stream drives the live view, is persisted verbatim in the
 /// recording, and is re-applied by Replay at the original pace. <see cref="T"/> is seconds since run start.
@@ -55,6 +65,7 @@ public enum RunOutcome
 [JsonDerivedType(typeof(SampleEvent), "sample")]
 [JsonDerivedType(typeof(MeasurementEvent), "measurement")]
 [JsonDerivedType(typeof(TestSkippedEvent), "skipped")]
+[JsonDerivedType(typeof(TestPreparedEvent), "prepared")]
 [JsonDerivedType(typeof(TestCompletedEvent), "testCompleted")]
 [JsonDerivedType(typeof(MachineActivityEvent), "activity")]
 [JsonDerivedType(typeof(RunCompletedEvent), "runCompleted")]
@@ -81,6 +92,12 @@ public sealed record MeasurementEvent(string TestId, DriveRole Drive, int Iterat
 
 /// <summary>The test could not run (tool missing, no network, low disk, error).</summary>
 public sealed record TestSkippedEvent(string TestId, string Reason) : BenchEvent;
+
+/// <summary>
+/// The test's fixture is prepared and kept for the next Run. <see cref="Seconds"/> is how long the
+/// preparation took (0 when <see cref="Reused"/> an earlier preparation or nothing was needed).
+/// </summary>
+public sealed record TestPreparedEvent(string TestId, double Seconds, bool Reused = false) : BenchEvent;
 
 /// <summary>The test finished all of its iterations.</summary>
 public sealed record TestCompletedEvent(string TestId) : BenchEvent;

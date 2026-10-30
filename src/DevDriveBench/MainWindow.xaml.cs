@@ -35,6 +35,30 @@ public sealed partial class MainWindow : Window
             height));
 
         RootFrame.Navigate(typeof(MainPage));
+        AppWindow.Closing += OnClosing;
+    }
+
+    private bool _closing;
+
+    /// <summary>Kept fixtures (clones, caches) are always deleted: hide the window, clean up, then exit.</summary>
+    private async void OnClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_closing || RootFrame.Content is not MainPage page || !page.ViewModel.NeedsShutdown)
+        {
+            return;
+        }
+
+        args.Cancel = true;
+        _closing = true;
+        sender.Hide();
+        try
+        {
+            await page.ViewModel.ShutdownAsync();
+        }
+        finally
+        {
+            Application.Current.Exit();
+        }
     }
 
     /// <summary>Switches between the overlapped window and full screen (stage mode).</summary>

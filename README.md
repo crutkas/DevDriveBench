@@ -20,15 +20,23 @@ winapp run .
 
 | Key | Action |
 |-----|--------|
+| `F6` | Prepare |
 | `F5` | Run (Live) or play (Replay) |
 | `Esc` | Stop |
 | `F11` | Full screen (stage mode) |
 
+- **Prepare** does every selected test's one-time setup now (seed clones, package downloads, the
+  eShop restore) and keeps it, so **Run** goes straight to measuring. Rows show progress, then
+  `ready`; the button becomes **✓ Ready**. Runs reuse the prepared fixtures until something that
+  shapes them changes (tests, git fixture size, a tool version), and then Prepare shows again.
+  Run without Prepare still works and prepares as it goes. Prepared fixtures are deleted
+  when the app closes, or from the gear menu.
 - **Live** runs the benchmark on this machine. **Runs** (default 1) is iterations per drive per test;
   raise it to gather steadier data.
 - **Replay** plays a recorded run back at its original pace (1×, or 2–8× to skip ahead). Use it
   if the stage machine has no Dev Drive, no network, or no time. The app ships a real recorded
-  sample; every Live run you make is added to the list.
+  sample; every Live run you make is added to the list. A run recorded after Prepare carries its
+  preparation, so Replay has the same Prepare → Run flow.
 - The gear menu picks tests, the git fixture size, and the Dev Drive (when there are several).
 
 ## What is measured
@@ -49,14 +57,16 @@ so an ARM64 machine never gets an emulated toolchain by default. Installers may 
 The app re-reads PATH afterwards, so the test is ready without a restart. A test that fails (no
 network, low disk) shows as a skipped row with the reason.
 
-**Methodology.** Each test prepares its fixture once, then runs N cold iterations on the system
-drive and N on the Dev Drive. Every workload iteration re-copies its package cache cold onto the
-drive under test, so cache, sources, and build output all live on the drive being measured; only the
-tool invocation itself is timed. With N ≥ 2 the first iteration is a discarded warm-up and the median
-of the rest is reported (ticks on each lane show every raw run; the dim tick is the warm-up). With
-N = 1 that single run is reported. Build servers are shut down before and after every timed
-`dotnet build` (untimed), so the second drive never inherits warm MSBuild/compiler processes from
-the first. The headline is the median advantage
+**Methodology.** Each test prepares its fixture once (Prepare, or the start of a Run), then runs N
+cold iterations on the system drive and N on the Dev Drive. Every workload iteration re-copies its
+package cache cold onto the drive under test, into fresh folders, right before it is timed, so
+cache, sources, and build output all live on the drive being measured; only the tool invocation
+itself is timed. With N ≥ 2 the first iteration is a discarded warm-up and the median of the rest
+is reported (ticks on each lane show every raw run; the dim tick is the warm-up). With N = 1 that
+single run is reported. Build servers are shut down before every timed `dotnet build` (untimed,
+while that iteration's files are copied), so the second drive never inherits warm MSBuild/compiler
+processes from the first. Iterations' files are deleted once the run's result is on screen (or
+sooner if a drive runs low), not between timed steps. The headline is the median advantage
 across workloads; synthetic disk numbers are shown separately and never feed the headline.
 
 The disk pass runs first, while the machine is quiet. The git fixture is written with
@@ -71,7 +81,8 @@ Every Live run is saved to `Documents\DevDriveBench\Runs`:
   Drive/trusted, bus, VHDX backing file), `fsutil devdrv query` output, plan, each tool's version
   and the architecture of the binary that really runs (git's own `git.exe`, `node.exe` behind
   `npm.cmd`, the toolchain's `cargo.exe` behind rustup's proxy), every timestamped event (phases,
-  raw per-iteration values, live disk samples, 4 Hz disk/CPU activity) and a results summary. This
+  raw per-iteration values, live disk samples, 4 Hz disk/CPU activity), a results summary and, for a
+  run made after Prepare, the preparation's own events. This
   is what Replay plays. A tool whose architecture doesn't match the OS (e.g. x64 node on ARM64) is
   flagged next to its row.
 - `*.csv` — one row per raw iteration (`test_id, drive_role, iteration, value, discarded,
@@ -82,6 +93,8 @@ Headless data gathering uses the same engine and produces the same files:
 
 ```powershell
 dotnet run --project src\DevDriveBench.Cli -- --runs 5 --tests disk,git-clone
+dotnet run --project src\DevDriveBench.Cli -- --prepare   # stage flow: prepare, then run; prints dead time between timed steps
+dotnet run --project src\DevDriveBench.Cli -- --timing <recording.json>   # same dead-time report for any saved run
 dotnet run --project src\DevDriveBench.Cli -- --list      # drives, Dev Drive status, tools + architecture
 ```
 

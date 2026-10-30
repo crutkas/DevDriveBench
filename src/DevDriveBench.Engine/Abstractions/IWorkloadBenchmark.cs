@@ -93,6 +93,13 @@ public interface IWorkloadBenchmark
     double MeasureOnce(string driveRoot, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Deletes everything the benchmark wrote on the drives under test (working copies, per-iteration
+    /// caches, bench folders) but keeps the prepared seed, so the next run skips <see cref="Prepare"/>.
+    /// Must be safe to call at any time and must never throw.
+    /// </summary>
+    void CleanupDrives();
+
+    /// <summary>
     /// Deletes every fixture/working directory the benchmark created, on both drives and the seed
     /// root. Must be safe to call even if <see cref="Prepare"/> threw, and must never throw.
     /// </summary>

@@ -211,6 +211,35 @@ public sealed partial class MainPage : Page
         Brush dot = Theme.Tertiary;
         double dotOpacity = 1;
 
+        if (state.Outcome is RunOutcome outcome && info is not null)
+        {
+            // The result shows the moment measuring ends; deleting the run's files continues quietly.
+            if (info.Session == SessionKind.Prepare)
+            {
+                int ready = state.Tests.Count(t => t.Descriptor.IsWorkload && t.Status == TestStatus.Ready);
+                int workloads = state.Tests.Count(t => t.Descriptor.IsWorkload);
+                text = outcome == RunOutcome.Completed
+                    ? $"Ready  ·  {(ready == workloads ? $"{ready}" : $"{ready} of {workloads}")} workload{(workloads == 1 ? string.Empty : "s")} prepared in {Fmt.Clock(state.LastEventTime)}  ·  F5 to run"
+                    : $"Preparation stopped  ·  {Fmt.Clock(state.LastEventTime)}";
+            }
+            else
+            {
+                text = outcome switch
+                {
+                    RunOutcome.Completed => $"Done  ·  {Fmt.Clock(state.LastEventTime)}",
+                    RunOutcome.Cancelled => $"Stopped  ·  {Fmt.Clock(state.LastEventTime)}",
+                    _ => "Failed  ·  " + state.Error,
+                };
+            }
+
+            dot = outcome == RunOutcome.Completed ? Theme.DevDrive : Theme.SystemDrive;
+            Set(NowText, text);
+            NowDot.Fill = dot;
+            NowDot.Opacity = 1;
+            Set(ElapsedText, Fmt.Clock(state.LastEventTime));
+            return;
+        }
+
         if (running && state.OpenPhase is PhaseStartedEvent p && info is not null && state.Find(p.TestId) is TestState t)
         {
             string letter = p.Drive == DriveRole.Dev ? info.DevDrive.Letter : info.SystemDrive.Letter;
@@ -227,18 +256,8 @@ public sealed partial class MainPage : Page
         }
         else if (running)
         {
-            text = ViewModel.IsShowingReplay ? "Replaying" : "Starting";
+            text = info?.Session == SessionKind.Prepare ? "Preparing" : ViewModel.IsShowingReplay ? "Replaying" : "Starting";
             dotOpacity = 0.35 + (0.65 * Math.Abs(Math.Sin(now * Math.PI)));
-        }
-        else if (state.Outcome is RunOutcome outcome)
-        {
-            text = outcome switch
-            {
-                RunOutcome.Completed => $"Done  ·  {Fmt.Clock(state.LastEventTime)}",
-                RunOutcome.Cancelled => $"Stopped  ·  {Fmt.Clock(state.LastEventTime)}",
-                _ => "Failed  ·  " + state.Error,
-            };
-            dot = outcome == RunOutcome.Completed ? Theme.DevDrive : Theme.SystemDrive;
         }
         else if (!ViewModel.IsReady)
         {
@@ -251,9 +270,19 @@ public sealed partial class MainPage : Page
         else
         {
             int tests = info.Tests.Select(x => x.Group).Distinct().Count();
-            text = ViewModel.IsShowingReplay
-                ? $"Ready to replay  ·  {tests} test{(tests == 1 ? string.Empty : "s")}"
-                : $"Ready  ·  {tests} test{(tests == 1 ? string.Empty : "s")}  ·  {info.Iterations} run{(info.Iterations == 1 ? string.Empty : "s")} per drive  ·  F5";
+            string testsText = $"{tests} test{(tests == 1 ? string.Empty : "s")}";
+            string runsText = $"{info.Iterations} run{(info.Iterations == 1 ? string.Empty : "s")} per drive";
+            text = (ViewModel.IsShowingReplay, ViewModel.IsPrepared) switch
+            {
+                (true, true) => $"Ready to replay  ·  {testsText}  ·  F5",
+                (true, false) => $"Replay  ·  {testsText}{(ViewModel.CanPrepare ? "  ·  Prepare, then F5" : "  ·  F5")}",
+                (false, true) => $"Ready  ·  {testsText} prepared  ·  {runsText}  ·  F5",
+                _ => $"{testsText}  ·  {runsText}  ·  Prepare, then F5",
+            };
+            if (ViewModel.IsPrepared)
+            {
+                dot = Theme.DevDrive;
+            }
         }
 
         Set(NowText, text);
@@ -350,7 +379,7 @@ public sealed partial class MainPage : Page
                 ProfileButtons.SelectedIndex = ViewModel.IsThorough ? 0 : 1;
             }
 
-            if (property is nameof(MainViewModel.IsRunning))
+            if (property is nameof(MainViewModel.IsRunning) or nameof(MainViewModel.IsPrepared) or nameof(MainViewModel.CanPrepare))
             {
                 _dirtyFrames = 60;
             }
@@ -407,6 +436,15 @@ public sealed partial class MainPage : Page
         if (!ViewModel.IsRunning && ViewModel.CanRun)
         {
             ViewModel.RunOrStopCommand.Execute(null);
+            args.Handled = true;
+        }
+    }
+
+    private void OnPrepareAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (ViewModel.CanPrepare)
+        {
+            ViewModel.PrepareCommand.Execute(null);
             args.Handled = true;
         }
     }

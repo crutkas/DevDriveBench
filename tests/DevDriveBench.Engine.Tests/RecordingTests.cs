@@ -26,6 +26,25 @@ public class RecordingTests : IDisposable
     }
 
     [Fact]
+    public void PreparationIsSavedWithTheRun()
+    {
+        var prepEvents = new List<BenchEvent>
+        {
+            new RunStartedEvent(Sample.Info() with { Session = SessionKind.Prepare }) { T = 0 },
+            new TestStartedEvent("git-clone") { T = 0 },
+            new PhaseStartedEvent("git-clone", RunPhase.Prepare, DriveRole.None, 0) { T = 0.1 },
+            new TestPreparedEvent("git-clone", 0.9) { T = 1.0 },
+            new RunCompletedEvent(RunOutcome.Completed) { T = 1.1 },
+        };
+        RunRecording run = RunRecording.FromEvents(Sample.Stream()) with { Preparation = RunRecording.FromEvents(prepEvents) };
+
+        RunRecording loaded = RecordingStore.Load(RecordingStore.Save(run, _dir));
+        Assert.NotNull(loaded.Preparation);
+        Assert.Equal(SessionKind.Prepare, loaded.Preparation!.Info.Session);
+        Assert.Equal(0.9, loaded.Preparation.Events.OfType<TestPreparedEvent>().Single().Seconds);
+    }
+
+    [Fact]
     public void JsonRoundTripPreservesEveryEvent()
     {
         RunRecording original = RunRecording.FromEvents(Sample.Stream());

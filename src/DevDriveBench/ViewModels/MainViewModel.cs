@@ -110,6 +110,11 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _isLiveSession;
     private bool _revertingMode;
     private bool _wingetAvailable;
+    private Task? _sessionTask;
+    private RunRecording? _lastPreparation;
+    private RunRecording? _selectedPreparation;
+    private string? _replayPreparedPath;
+    private bool _replayingPreparation;
 
     public MainViewModel(DispatcherQueue dispatcher)
     {
@@ -134,25 +139,47 @@ public sealed partial class MainViewModel : ObservableObject
     public IReadOnlyList<string> ReplaySpeeds { get; } = new[] { "1×", "2×", "4×", "8×" };
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsLiveMode), nameof(CanRun))]
+    [NotifyPropertyChangedFor(nameof(IsLiveMode), nameof(CanRun), nameof(CanPrepare))]
     public partial bool IsReplayMode { get; set; }
 
     public bool IsLiveMode => !IsReplayMode;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanRun), nameof(RunLabel), nameof(RunGlyph), nameof(IsIdle))]
+    [NotifyPropertyChangedFor(nameof(CanRun), nameof(RunLabel), nameof(RunGlyph), nameof(IsIdle), nameof(CanPrepare))]
     public partial bool IsRunning { get; set; }
+
+    /// <summary>
+    /// Live run measured and on screen, its files still being deleted: Run shows (disabled) instead of
+    /// Stop, since there is nothing left to stop.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRun), nameof(RunLabel), nameof(RunGlyph))]
+    public partial bool IsFinishing { get; set; }
 
     public bool IsIdle => !IsRunning;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanRun))]
+    [NotifyPropertyChangedFor(nameof(CanRun), nameof(CanPrepare))]
     public partial bool IsReady { get; set; }
 
     /// <summary>True while any winget install runs (Run waits, so installers never overlap a measurement).</summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanRun))]
+    [NotifyPropertyChangedFor(nameof(CanRun), nameof(CanPrepare))]
     public partial bool IsInstalling { get; set; }
+
+    /// <summary>
+    /// Every selected workload's fixture is prepared for the current tools and profile (Live), or the
+    /// recording's preparation has been played (Replay): Run goes straight to measuring.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanPrepare), nameof(ShowPrepareButton))]
+    public partial bool IsPrepared { get; set; }
+
+    public bool ShowPrepareButton => !IsPrepared && !(IsReplayMode && _selectedPreparation is null);
+
+    /// <summary>True when Prepare has something to do (Live) or something to play (Replay).</summary>
+    public bool CanPrepare => IsReady && !IsRunning && !IsInstalling && !IsPrepared &&
+        (IsReplayMode ? _selectedPreparation is not null : DevDrive is not null && SystemDrive is not null);
 
     /// <summary>Iterations per drive per test; default 1 (fast). With ≥ 2 the first is discarded.</summary>
     [ObservableProperty]
@@ -170,7 +197,7 @@ public sealed partial class MainViewModel : ObservableObject
     public partial int ReplaySpeedIndex { get; set; }
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanRun), nameof(HasDevDrive))]
+    [NotifyPropertyChangedFor(nameof(CanRun), nameof(HasDevDrive), nameof(CanPrepare))]
     public partial DriveDescriptor? DevDrive { get; set; }
 
     [ObservableProperty]
@@ -185,11 +212,13 @@ public sealed partial class MainViewModel : ObservableObject
 
     public bool HasDevDrive => DevDrive is not null;
 
-    public bool CanRun => IsRunning || (IsReady && !IsInstalling && (IsReplayMode ? SelectedRecording is not null : DevDrive is not null && SystemDrive is not null));
+    public bool CanRun => IsFinishing
+        ? false
+        : IsRunning || (IsReady && !IsInstalling && (IsReplayMode ? SelectedRecording is not null : DevDrive is not null && SystemDrive is not null));
 
-    public string RunLabel => IsRunning ? "Stop" : "Run";
+    public string RunLabel => IsRunning && !IsFinishing ? "Stop" : "Run";
 
-    public string RunGlyph => IsRunning ? "\uE71A" : "\uE768";
+    public string RunGlyph => IsRunning && !IsFinishing ? "\uE71A" : "\uE768";
 
     public double ReplaySpeed => ReplaySpeedIndex switch { 1 => 2, 2 => 4, 3 => 8, _ => 1 };
 
@@ -347,18 +376,86 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (IsRunning)
         {
-            Stop();
+            if (!IsFinishing)
+            {
+                Stop();
+            }
+
             return;
         }
 
         if (IsReplayMode)
         {
-            StartReplay();
+            StartReplay(preparation: false);
         }
         else
         {
-            await RunLiveAsync();
+            await LiveSessionAsync(SessionKind.Run);
         }
+    }
+
+    /// <summary>
+    /// Live: prepares every selected workload's fixture now and keeps it, so Run measures straight
+    /// away. Replay: plays the recording's preparation, so the stage flow is the same.
+    /// </summary>
+    [RelayCommand]
+    private async Task PrepareAsync()
+    {
+        if (!CanPrepare)
+        {
+            return;
+        }
+
+        if (IsReplayMode)
+        {
+            StartReplay(preparation: true);
+        }
+        else
+        {
+            await LiveSessionAsync(SessionKind.Prepare);
+        }
+    }
+
+    /// <summary>Deletes every kept fixture (they are also deleted when the app closes).</summary>
+    [RelayCommand]
+    private async Task ClearPreparedAsync()
+    {
+        if (IsRunning)
+        {
+            return;
+        }
+
+        FooterText = "Deleting prepared fixtures";
+        await Task.Run(_runner.ReleasePrepared);
+        _lastPreparation = null;
+        UpdatePreparedState();
+        FooterText = "Prepared fixtures deleted";
+        if (!IsShowingReplay)
+        {
+            ShowPreview();
+        }
+    }
+
+    /// <summary>True when closing the app must first delete kept fixtures or stop a session.</summary>
+    public bool NeedsShutdown => IsRunning || _runner.HasPreparedSeeds;
+
+    /// <summary>Stops any session and deletes every kept fixture; called when the window closes.</summary>
+    public async Task ShutdownAsync()
+    {
+        _cts?.Cancel();
+        if (_sessionTask is Task running)
+        {
+            try
+            {
+                await running;
+            }
+            catch
+            {
+                // Cancellation/failure: cleanup below still runs.
+            }
+        }
+
+        await Task.Run(_runner.ReleasePrepared);
     }
 
     [RelayCommand]
@@ -386,10 +483,17 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _replayClock.Stop();
             IsRunning = false;
+            if (_replayingPreparation && State.Outcome == RunOutcome.Completed)
+            {
+                _replayPreparedPath = SelectedRecording?.Summary.Path;
+            }
+
+            _replayingPreparation = false;
+            UpdatePreparedState();
         }
     }
 
-    private async Task RunLiveAsync()
+    private async Task LiveSessionAsync(SessionKind kind)
     {
         if (SystemDrive is null || DevDrive is null)
         {
@@ -412,20 +516,47 @@ public sealed partial class MainViewModel : ObservableObject
         IsShowingReplay = false;
         IsRunning = true;
         LastSavedPath = null;
-        FooterText = "Recording";
+        FooterText = kind == SessionKind.Prepare ? "Preparing fixtures" : "Recording";
         ResetState();
 
         RunRecording recording;
         try
         {
-            recording = await _runner.RunAsync(plan, e => _dispatcher.TryEnqueue(() => Apply(e)), tests, _cts.Token);
+            Action<BenchEvent> sink = e => _dispatcher.TryEnqueue(() => Apply(e));
+            Task<RunRecording> session = kind == SessionKind.Prepare
+                ? _runner.PrepareAsync(plan, sink, tests, _cts.Token)
+                : _runner.RunAsync(plan, sink, tests, _cts.Token);
+            _sessionTask = session;
+            recording = await session;
         }
         finally
         {
+            _sessionTask = null;
             _isLiveSession = false;
+            IsFinishing = false;
             IsRunning = false;
             _cts.Dispose();
             _cts = null;
+            UpdatePreparedState();
+        }
+
+        if (kind == SessionKind.Prepare)
+        {
+            if (recording.Events.OfType<TestPreparedEvent>().Any())
+            {
+                _lastPreparation = recording;
+            }
+
+            int prepared = recording.Events.OfType<TestPreparedEvent>().Count(e => !e.TestId.StartsWith(TestCatalog.DiskGroup, StringComparison.Ordinal));
+            FooterText = recording.Outcome == RunOutcome.Completed
+                ? $"Prepared {prepared} workload{(prepared == 1 ? string.Empty : "s")} in {Fmt(recording.DurationSeconds)} · Run measures straight away · fixtures are deleted when the app closes"
+                : "Preparation stopped";
+            return;
+        }
+
+        if (recording.Info.PreparedAhead && _lastPreparation is not null)
+        {
+            recording = recording with { Preparation = _lastPreparation };
         }
 
         try
@@ -441,7 +572,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private void StartReplay()
+    private void StartReplay(bool preparation)
     {
         if (SelectedRecording is null)
         {
@@ -459,7 +590,14 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        _replay = new ReplayScheduler(recording.Events);
+        RunRecording? played = preparation ? recording.Preparation : recording;
+        if (played is null)
+        {
+            return;
+        }
+
+        _replay = new ReplayScheduler(played.Events);
+        _replayingPreparation = preparation;
         _replayOffset = 0;
         _isLiveSession = false;
         IsShowingReplay = true;
@@ -486,6 +624,12 @@ public sealed partial class MainViewModel : ObservableObject
     private void Apply(BenchEvent e)
     {
         State.Apply(e);
+        if (e is RunCompletedEvent && _isLiveSession && State.Info?.Session == SessionKind.Run)
+        {
+            IsFinishing = true;
+            FooterText = "Done · deleting this run's files";
+        }
+
         EventApplied?.Invoke(this, e);
     }
 
@@ -505,6 +649,7 @@ public sealed partial class MainViewModel : ObservableObject
 
         IsShowingReplay = false;
         RunInfo? info = null;
+        _selectedPreparation = null;
         if (IsReplayMode)
         {
             if (SelectedRecording is not null)
@@ -513,6 +658,7 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     RunRecording r = RecordingStore.Load(SelectedRecording.Summary.Path);
                     info = r.Info;
+                    _selectedPreparation = r.Preparation;
                     IsShowingReplay = true;
                     FooterText = ReplayFooter(r.Info);
                 }
@@ -547,7 +693,35 @@ public sealed partial class MainViewModel : ObservableObject
         {
             Apply(new RunStartedEvent(info));
         }
+
+        UpdatePreparedState();
     }
+
+    /// <summary>
+    /// Recomputes <see cref="IsPrepared"/>: Live — every selected, available workload has a kept seed
+    /// matching its current tool and fixture size; Replay — the selected recording's preparation was played.
+    /// </summary>
+    private void UpdatePreparedState()
+    {
+        if (IsReplayMode)
+        {
+            IsPrepared = _selectedPreparation is not null && _replayPreparedPath is string p && p == SelectedRecording?.Summary.Path;
+        }
+        else
+        {
+            WorkloadProfile profile = IsThorough ? WorkloadProfile.Thorough : WorkloadProfile.Quick;
+            var groups = new HashSet<string>(Tests.Where(t => t.IsSelected && t.IsAvailable).Select(t => t.Group));
+            TestDescriptor[] workloads = _described.Where(d => d.IsWorkload && d.Available && groups.Contains(d.Group)).ToArray();
+            // Nothing to prepare (disk passes only) counts as ready: Run measures straight away.
+            IsPrepared = workloads.All(d => _runner.IsPrepared(d, profile));
+        }
+
+        OnPropertyChanged(nameof(CanPrepare));
+        OnPropertyChanged(nameof(ShowPrepareButton));
+    }
+
+    private static string Fmt(double seconds) =>
+        seconds < 60 ? $"{seconds:0} s" : $"{(int)(seconds / 60)}:{(int)(seconds % 60):00}";
 
     private IReadOnlyList<TestDescriptor> DescribeFor(WorkloadProfile profile) =>
         _described

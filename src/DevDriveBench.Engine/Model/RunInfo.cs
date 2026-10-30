@@ -135,4 +135,13 @@ public sealed record RunInfo
 
     /// <summary>Raw <c>fsutil devdrv query</c> output for the Dev Drive (AV filter / performance mode context).</summary>
     public string? DevDriveFilterInfo { get; init; }
+
+    /// <summary>Whether this session measured (<see cref="SessionKind.Run"/>) or only prepared fixtures.</summary>
+    public SessionKind Session { get; init; } = SessionKind.Run;
+
+    /// <summary>
+    /// True when at least one workload was prepared before this run started, so its one-time Prepare
+    /// isn't in this recording's timeline (see <c>RunRecording.Preparation</c>).
+    /// </summary>
+    public bool PreparedAhead { get; init; }
 }

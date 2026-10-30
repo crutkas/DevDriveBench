@@ -23,9 +23,10 @@ namespace DevDriveBench.Engine.Platform;
 /// override at build time. So restore output (eShop uses <c>UseArtifactsOutput</c>, i.e.
 /// <c>artifacts/</c>) is never copied; each iteration runs a fully offline restore that resolves from
 /// the just-copied per-drive cache.</para>
-/// <para><b>Fair, cold builds:</b> build servers are shut down (untimed) before and after every timed
-/// build, so the Dev Drive run can't inherit MSBuild worker nodes or a warm compiler server left
-/// behind by the system-drive run (that would favor whichever drive goes second), while the build
+/// <para><b>Fair, cold builds:</b> build servers are shut down (untimed, while the next iteration's
+/// setup copies files) and must be gone before every timed build, so the Dev Drive run can't inherit
+/// MSBuild worker nodes or a warm compiler server left behind by the system-drive run (that would
+/// favor whichever drive goes second), while the build
 /// still shares its compiler server across projects like a real first build of the day. Restores run
 /// with <c>--disable-build-servers</c>. NuGet audit is disabled because it needs the network and
 /// eShop treats warnings as errors.</para>
@@ -110,49 +111,81 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
     /// <inheritdoc />
     protected override double MeasureCore(string driveRoot, string workDir, string cacheDir, CancellationToken cancellationToken)
     {
-        // SETUP (untimed) 1/3: a cold copy of the warm seed NuGet cache on the drive under test.
-        PopulateColdCache(_seedCache, cacheDir);
+        // Servers left by the previous build are shut down while the setup below runs (the offline
+        // restore never starts any); the timed build still waits until they are gone. The seed folder
+        // carries the same global.json as the copy, so the shutdown targets the same SDK's servers.
+        Task shutdown = Task.Run(() => ShutdownBuildServers(_repoSeed, cancellationToken), CancellationToken.None);
+        try
+        {
+            // SETUP (untimed) 1/3: a cold copy of the warm seed NuGet cache on the drive under test.
+            PopulateColdCache(_seedCache, cacheDir);
 
-        // SETUP (untimed) 2/3: the source, without git metadata or any build/restore output (the
-        // offline restore below regenerates it pointing at the per-drive cache).
-        CopyDirectory(_repoSeed, workDir, skipDirectory: name => name is ".git" or "artifacts" or "bin" or "obj" or "node_modules");
+            // SETUP (untimed) 2/3: the source, without git metadata or any build/restore output (the
+            // offline restore below regenerates it pointing at the per-drive cache).
+            CopyDirectory(_repoSeed, workDir, skipDirectory: name => name is ".git" or "artifacts" or "bin" or "obj" or "node_modules");
 
-        IReadOnlyDictionary<string, string> nugetEnvironment = NugetEnvironment(cacheDir);
+            // SETUP (untimed) 3/3: restore OFFLINE against the per-drive cache. `--source <empty dir>`
+            // overrides every feed, so nothing can come from the network.
+            string offlineFeed = Path.Combine(workDir, "_offline-feed");
+            Directory.CreateDirectory(offlineFeed);
+            RunChecked(
+                new WorkloadProcessRequest(
+                    "dotnet",
+                    $"restore {SolutionFilter} {CommonArgs} --source \"{offlineFeed}\"",
+                    workDir,
+                    NugetEnvironment(cacheDir),
+                    RestoreTimeoutMs),
+                cancellationToken,
+                "dotnet restore (offline, per-drive cache)");
+        }
+        catch
+        {
+            // Setup failed: still wait for the servers to go, but report the setup error.
+            try
+            {
+                shutdown.GetAwaiter().GetResult();
+            }
+            catch
+            {
+                // Secondary to the setup failure being reported.
+            }
 
-        // SETUP (untimed) 3/3: restore OFFLINE against the per-drive cache. `--source <empty dir>`
-        // overrides every feed, so nothing can come from the network.
-        string offlineFeed = Path.Combine(workDir, "_offline-feed");
-        Directory.CreateDirectory(offlineFeed);
-        RunChecked(
-            new WorkloadProcessRequest(
-                "dotnet",
-                $"restore {SolutionFilter} {CommonArgs} --source \"{offlineFeed}\"",
-                workDir,
-                nugetEnvironment,
-                RestoreTimeoutMs),
-            cancellationToken,
-            "dotnet restore (offline, per-drive cache)");
+            throw;
+        }
 
-        // TIMED: the build of the whole solution filter, resolving from the per-drive cache. Build servers
-        // are shut down (untimed) first and after, so each drive's build starts with no warm MSBuild
-        // nodes or compiler server inherited from the other drive's run, yet shares its compiler
-        // server across projects within the build like a real first build of the day.
-        ShutdownBuildServers(workDir, nugetEnvironment, cancellationToken);
-        double seconds = TimeProcess(
+        shutdown.GetAwaiter().GetResult();
+
+        // TIMED: the build of the whole solution filter, resolving from the per-drive cache. Each drive's
+        // build starts with no warm MSBuild nodes or compiler server inherited from the other drive's run,
+        // yet shares its compiler server across projects within the build like a real first build of the
+        // day. The servers this build leaves behind are shut down during the next iteration's setup or
+        // when the run's drives are cleaned up.
+        return TimeProcess(
             new WorkloadProcessRequest(
                 "dotnet",
                 $"build {SolutionFilter} -c Release --no-restore --nologo -p:NuGetAudit=false",
                 workDir,
-                nugetEnvironment,
+                NugetEnvironment(cacheDir),
                 BuildTimeoutMs),
             cancellationToken,
             "dotnet build");
-        ShutdownBuildServers(workDir, nugetEnvironment, cancellationToken);
-        return seconds;
     }
 
-    private void ShutdownBuildServers(string workDir, IReadOnlyDictionary<string, string> environment, CancellationToken cancellationToken) =>
-        Runner.Run(new WorkloadProcessRequest("dotnet", "build-server shutdown", workDir, environment, 120_000), cancellationToken);
+    /// <inheritdoc />
+    protected override void ReleaseResources()
+    {
+        try
+        {
+            Runner.Run(new WorkloadProcessRequest("dotnet", "build-server shutdown", null, null, 120_000));
+        }
+        catch
+        {
+            // Best-effort: idle servers exit on their own.
+        }
+    }
+
+    private void ShutdownBuildServers(string workDir, CancellationToken cancellationToken) =>
+        Runner.Run(new WorkloadProcessRequest("dotnet", "build-server shutdown", workDir, null, 120_000), cancellationToken);
 
     private void RunPrepare(WorkloadProcessRequest request, string what, CancellationToken cancellationToken, int timeoutMs, bool createDirectory = false)
     {

@@ -29,6 +29,12 @@ public sealed record RunRecording
 
     public IReadOnlyList<BenchEvent> Events { get; init; } = Array.Empty<BenchEvent>();
 
+    /// <summary>
+    /// The Prepare session that produced the fixtures this run reused (present when
+    /// <see cref="RunInfo.PreparedAhead"/>), so Replay can show the preparation too.
+    /// </summary>
+    public RunRecording? Preparation { get; init; }
+
     /// <summary>Builds a recording by folding <paramref name="events"/>.</summary>
     public static RunRecording FromEvents(IReadOnlyList<BenchEvent> events)
     {

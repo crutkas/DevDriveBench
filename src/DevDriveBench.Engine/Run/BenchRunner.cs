@@ -41,6 +41,8 @@ public sealed class BenchRunner
     private readonly DiskBenchmarkOptions _diskOptions;
     private readonly Func<string> _seedRootFactory;
     private readonly Stopwatch _clock = new();
+    private readonly Dictionary<string, string> _prepared = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _preparedGate = new();
 
     public BenchRunner(
         IDiskBenchmark disk,
@@ -129,15 +131,84 @@ public sealed class BenchRunner
     /// <summary>
     /// Runs the plan on a background thread. <paramref name="sink"/> receives every event (on the
     /// benchmark or sampler thread, serialized, in timestamp order) and must return quickly.
-    /// The returned recording is complete even when the run is cancelled.
+    /// Workloads already prepared (by <see cref="PrepareAsync"/> or an earlier run) go straight to
+    /// measuring; the rest prepare inline. Prepared seeds are kept for the next run (see
+    /// <see cref="ReleasePrepared"/>). The returned recording is complete even when cancelled; it is
+    /// returned after the run's per-drive files are deleted, which happens after
+    /// <see cref="RunCompletedEvent"/> so the result appears without waiting for cleanup.
     /// </summary>
     public Task<RunRecording> RunAsync(BenchPlan plan, Action<BenchEvent>? sink = null, IReadOnlyList<TestDescriptor>? tests = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        return Task.Run(() => Run(plan, sink, tests, cancellationToken), CancellationToken.None);
+        return Task.Run(() => Session(plan, sink, tests, SessionKind.Run, cancellationToken), CancellationToken.None);
     }
 
-    private RunRecording Run(BenchPlan plan, Action<BenchEvent>? sink, IReadOnlyList<TestDescriptor>? describedTests, CancellationToken ct)
+    /// <summary>
+    /// Prepares every selected workload's fixture ahead of time (the network/seed step) and keeps it,
+    /// emitting the same event stream so the preparation can be shown live and replayed. A later
+    /// <see cref="RunAsync"/> skips straight to measuring for these workloads.
+    /// </summary>
+    public Task<RunRecording> PrepareAsync(BenchPlan plan, Action<BenchEvent>? sink = null, IReadOnlyList<TestDescriptor>? tests = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return Task.Run(() => Session(plan, sink, tests, SessionKind.Prepare, cancellationToken), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Identity of a prepared fixture: the tool that built it and, for git, the fixture size. Anything
+    /// else (drives, iterations) doesn't change the seed, so it doesn't invalidate a preparation.
+    /// </summary>
+    public static string PrepareKey(TestDescriptor test, WorkloadProfile profile) =>
+        $"{test.ToolVersion}|{test.ToolBinary}|{(test.Group == TestCatalog.GitClone ? profile.ToString() : string.Empty)}";
+
+    /// <summary>True when <paramref name="test"/>'s fixture is prepared for this tool and profile (disk tests need none).</summary>
+    public bool IsPrepared(TestDescriptor test, WorkloadProfile profile)
+    {
+        if (!test.IsWorkload)
+        {
+            return true;
+        }
+
+        lock (_preparedGate)
+        {
+            return _prepared.TryGetValue(test.Group, out string? key) && key == PrepareKey(test, profile);
+        }
+    }
+
+    /// <summary>True when any prepared seed is being kept (so it must be released on exit).</summary>
+    public bool HasPreparedSeeds
+    {
+        get
+        {
+            lock (_preparedGate)
+            {
+                return _prepared.Count > 0;
+            }
+        }
+    }
+
+    /// <summary>Deletes every kept seed (and anything left on the drives). Safe to call any time; never throws.</summary>
+    public void ReleasePrepared()
+    {
+        lock (_preparedGate)
+        {
+            _prepared.Clear();
+        }
+
+        foreach (IWorkloadBenchmark workload in _workloads)
+        {
+            try
+            {
+                workload.Cleanup();
+            }
+            catch
+            {
+                // Cleanup is best-effort by contract.
+            }
+        }
+    }
+
+    private RunRecording Session(BenchPlan plan, Action<BenchEvent>? sink, IReadOnlyList<TestDescriptor>? describedTests, SessionKind kind, CancellationToken ct)
     {
         int iterations = Math.Max(1, plan.Iterations);
         var events = new List<BenchEvent>(1024);
@@ -178,6 +249,8 @@ public sealed class BenchRunner
             Profile = plan.Profile,
             Tests = tests,
             DevDriveFilterInfo = _filterInfo(plan.DevDrive.Root),
+            Session = kind,
+            PreparedAhead = kind == SessionKind.Run && tests.Any(t => t.IsWorkload && t.Available && IsPrepared(t, plan.Profile)),
         };
 
         _clock.Restart();
@@ -186,6 +259,7 @@ public sealed class BenchRunner
         using var activityStop = new CancellationTokenSource();
         Thread activityThread = StartActivity(plan, Emit, activityStop.Token);
 
+        var touched = new List<IWorkloadBenchmark>();
         RunOutcome outcome = RunOutcome.Completed;
         string? error = null;
         try
@@ -202,11 +276,34 @@ public sealed class BenchRunner
 
                 if (group == TestCatalog.DiskGroup)
                 {
-                    RunDisk(rows, plan, iterations, Emit, ct);
+                    if (kind == SessionKind.Prepare)
+                    {
+                        foreach (TestDescriptor row in rows)
+                        {
+                            Emit(new TestPreparedEvent(row.Id, 0));
+                        }
+                    }
+                    else
+                    {
+                        RunDisk(rows, plan, iterations, Emit, ct);
+                    }
+
+                    continue;
+                }
+
+                IWorkloadBenchmark? benchmark = _workloads.FirstOrDefault(w => TestCatalog.WorkloadId(w.RequiredTool) == group);
+                if (benchmark is not null)
+                {
+                    touched.Add(benchmark);
+                }
+
+                if (kind == SessionKind.Prepare)
+                {
+                    PrepareWorkload(rows[0], benchmark, plan, environment, Emit, ct);
                 }
                 else
                 {
-                    RunWorkload(rows[0], plan, environment, iterations, Emit, ct);
+                    RunWorkload(rows[0], benchmark, plan, environment, iterations, Emit, ct);
                 }
             }
         }
@@ -228,6 +325,20 @@ public sealed class BenchRunner
         Emit(new RunCompletedEvent(outcome, error));
         _clock.Stop();
 
+        // Off the measured path: delete what the run wrote on the drives (working copies, per-iteration
+        // caches). Seeds stay for the next run until ReleasePrepared. (Prepare writes nothing there.)
+        foreach (IWorkloadBenchmark benchmark in kind == SessionKind.Run ? touched : new List<IWorkloadBenchmark>())
+        {
+            try
+            {
+                benchmark.CleanupDrives();
+            }
+            catch
+            {
+                // Best-effort by contract.
+            }
+        }
+
         BenchEvent[] snapshot;
         lock (gate)
         {
@@ -237,22 +348,98 @@ public sealed class BenchRunner
         return RunRecording.FromEvents(snapshot);
     }
 
-    private void RunWorkload(TestDescriptor test, BenchPlan plan, WorkloadEnvironment environment, int iterations, Action<BenchEvent> emit, CancellationToken ct)
+    private void PrepareWorkload(TestDescriptor test, IWorkloadBenchmark? benchmark, BenchPlan plan, WorkloadEnvironment environment, Action<BenchEvent> emit, CancellationToken ct)
     {
         emit(new TestStartedEvent(test.Id));
-        IWorkloadBenchmark? benchmark = _workloads.FirstOrDefault(w => TestCatalog.WorkloadId(w.RequiredTool) == test.Id);
         if (benchmark is null || !test.Available)
         {
             emit(new TestSkippedEvent(test.Id, test.UnavailableReason ?? "not available"));
             return;
         }
 
+        if (IsPrepared(test, plan.Profile))
+        {
+            emit(new TestPreparedEvent(test.Id, 0, Reused: true));
+            return;
+        }
+
+        try
+        {
+            var stopwatch = Stopwatch.StartNew();
+            EnsurePrepared(test, benchmark, plan, environment, emit, ct);
+            emit(new TestPreparedEvent(test.Id, Math.Round(stopwatch.Elapsed.TotalSeconds, 2)));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (WorkloadUnavailableException ex)
+        {
+            emit(new TestSkippedEvent(test.Id, ex.Message));
+        }
+        catch (Exception ex)
+        {
+            emit(new TestSkippedEvent(test.Id, "could not prepare: " + ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Prepares <paramref name="benchmark"/> unless its kept seed still matches; a stale seed (different
+    /// tool or fixture size) is deleted first. On any failure the partial seed is deleted.
+    /// </summary>
+    private void EnsurePrepared(TestDescriptor test, IWorkloadBenchmark benchmark, BenchPlan plan, WorkloadEnvironment environment, Action<BenchEvent> emit, CancellationToken ct)
+    {
         benchmark.Profile = plan.Profile;
+        if (IsPrepared(test, plan.Profile))
+        {
+            return;
+        }
+
+        Forget(test.Group, benchmark);
+        emit(new PhaseStartedEvent(test.Id, RunPhase.Prepare, DriveRole.None, 0));
+        try
+        {
+            benchmark.Prepare(environment, ct);
+        }
+        catch
+        {
+            benchmark.Cleanup();
+            throw;
+        }
+
+        lock (_preparedGate)
+        {
+            _prepared[test.Group] = PrepareKey(test, plan.Profile);
+        }
+    }
+
+    private void Forget(string group, IWorkloadBenchmark benchmark)
+    {
+        bool had;
+        lock (_preparedGate)
+        {
+            had = _prepared.Remove(group);
+        }
+
+        if (had)
+        {
+            benchmark.Cleanup();
+        }
+    }
+
+    private void RunWorkload(TestDescriptor test, IWorkloadBenchmark? benchmark, BenchPlan plan, WorkloadEnvironment environment, int iterations, Action<BenchEvent> emit, CancellationToken ct)
+    {
+        emit(new TestStartedEvent(test.Id));
+        if (benchmark is null || !test.Available)
+        {
+            emit(new TestSkippedEvent(test.Id, test.UnavailableReason ?? "not available"));
+            return;
+        }
+
         bool completed = false;
         try
         {
-            emit(new PhaseStartedEvent(test.Id, RunPhase.Prepare, DriveRole.None, 0));
-            benchmark.Prepare(environment, ct);
+            EnsurePrepared(test, benchmark, plan, environment, emit, ct);
 
             foreach ((DriveRole role, string root) in new[] { (DriveRole.System, plan.SystemDrive.Root), (DriveRole.Dev, plan.DevDrive.Root) })
             {
@@ -267,7 +454,6 @@ public sealed class BenchRunner
                     {
                         reported = true;
                         emit(new MeasurementEvent(test.Id, role, iteration, Math.Round(seconds, 4)));
-                        emit(new PhaseStartedEvent(test.Id, RunPhase.Cleanup, role, iteration));
                     };
                     double measured = benchmark.MeasureOnce(root, ct);
                     if (!reported)
@@ -286,21 +472,17 @@ public sealed class BenchRunner
         catch (WorkloadUnavailableException ex)
         {
             emit(new TestSkippedEvent(test.Id, ex.Message));
+            Forget(test.Group, benchmark);
         }
         catch (Exception ex)
         {
             emit(new TestSkippedEvent(test.Id, "could not run: " + ex.Message));
+            Forget(test.Group, benchmark);
         }
         finally
         {
             benchmark.TimedSectionStarting = null;
             benchmark.TimedSectionCompleted = null;
-            if (completed)
-            {
-                emit(new PhaseStartedEvent(test.Id, RunPhase.Cleanup, DriveRole.None, 0));
-            }
-
-            benchmark.Cleanup();
         }
 
         if (completed)

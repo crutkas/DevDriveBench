@@ -24,12 +24,16 @@ namespace DevDriveBench.Engine.Platform;
 /// </remarks>
 public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
 {
-    // F11: directories THIS benchmark created and may delete wholesale (its own Slug subfolders).
-    private readonly HashSet<string> _ownedDirectories = new(StringComparer.OrdinalIgnoreCase);
+    // F11: directories THIS benchmark created and may delete wholesale, split by lifetime: the seed
+    // (kept between runs once prepared) and the per-drive bench folders (deleted after every run).
+    private readonly HashSet<string> _seedOwned = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _driveOwned = new(StringComparer.OrdinalIgnoreCase);
 
     // F11: shared FIXED PARENTS (e.g. the per-drive bench root and the %TEMP% seed root) that sibling
     // benchmarks also use. These are NEVER deleted wholesale — only removed if they end up empty.
-    private readonly HashSet<string> _sharedParents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _seedParents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _driveParents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _trackGate = new();
 
     /// <summary>
     /// F9: small ownership receipt dropped into a per-drive bench <c>&lt;Slug&gt;</c> directory this
@@ -88,13 +92,19 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         // F11: this benchmark owns only its own Slug subfolder. The shared seed root is a FIXED PARENT
         // that sibling benchmarks also stage fixtures under, so never delete it wholesale — at Cleanup
         // remove it only if it has become empty.
-        TrackSharedParent(environment.SeedRoot);
-        Track(SeedDirectory);
+        TrackParent(environment.SeedRoot, seed: true);
+        Track(SeedDirectory, seed: true);
 
         PrepareCore(environment, cancellationToken);
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Nothing is deleted on the critical path: the iteration's working copy and its cold cache are
+    /// fresh, uniquely named directories that are removed by <see cref="CleanupDrives"/> after the run
+    /// (or right away if the drive runs low on space), so consecutive measurements aren't separated by
+    /// tree deletions.
+    /// </remarks>
     public double MeasureOnce(string driveRoot, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(driveRoot);
@@ -103,66 +113,108 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         string benchTop = Path.Combine(driveRoot, WorkloadPaths.BenchFolderName);
         string benchRoot = Path.Combine(benchTop, Slug);
 
+        // Deferred deletes must never fill a drive: if this one is getting low, clear what earlier
+        // iterations left behind before setting up the next one (rare; costs time only when needed).
+        if (FreeBytes(driveRoot) is long free && free < MinFreeBytesPerDrive)
+        {
+            CleanupDrives();
+        }
+
         // F9: only ever wholesale-delete benchRoot when THIS app created it or a prior run left our
         // ownership marker. A predictable pre-existing benchRoot WITHOUT the marker is foreign user data:
         // treat it as a fixed parent (removed only if empty) and confine wholesale deletion to the
-        // sub-directories we create under it (the cache + each per-iteration run dir).
+        // sub-directories we create under it (each iteration's cache + run dir).
         bool ownsBenchRoot = TryClaimOwnedDirectory(benchRoot);
 
         // The per-drive package-cache directory. It lives on the SAME drive under test so every timed
         // run is the honest "everything on this drive" case (cache + source + build output co-located).
-        // Each iteration RE-populates it cold from the warm seed (see MeasureCore / PopulateColdCache),
-        // so a measured run is a realistic COLD first-build rather than a warm steady-state iteration.
-        string cacheDir = Path.Combine(benchRoot, "cache");
-        Directory.CreateDirectory(cacheDir);
+        // Every iteration gets a NEW directory populated cold from the warm seed (see MeasureCore /
+        // PopulateColdCache), so a measured run is a realistic COLD first-build rather than a warm
+        // steady-state iteration.
+        string id = Guid.NewGuid().ToString("N");
+        string cacheDir = Path.Combine(benchRoot, "cache-" + id);
+        string workDir = Path.Combine(benchRoot, "run-" + id);
 
         // F11: benchTop is shared by sibling benchmarks, so it is a FIXED PARENT we never delete wholesale
         // (removed only if empty).
-        TrackSharedParent(benchTop);
+        TrackParent(benchTop, seed: false);
         if (ownsBenchRoot)
         {
-            Track(benchRoot); // app-owned (we created it / it carries our marker): safe to delete wholesale.
+            Track(benchRoot, seed: false); // app-owned (we created it / it carries our marker): safe to delete wholesale.
         }
         else
         {
             // F9: foreign pre-existing bench dir — never recurse-delete it. Remove it only if it becomes
             // empty, and wholesale-delete only the sub-directories we own under it.
-            TrackSharedParent(benchRoot);
-            Track(cacheDir);
+            TrackParent(benchRoot, seed: false);
+            Track(cacheDir, seed: false);
+            Track(workDir, seed: false);
         }
 
-        string workDir = Path.Combine(benchRoot, "run-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(cacheDir);
         Directory.CreateDirectory(workDir);
-        try
-        {
-            return MeasureCore(driveRoot, workDir, cacheDir, cancellationToken);
-        }
-        finally
-        {
-            DeleteTree(workDir);
-        }
+        return MeasureCore(driveRoot, workDir, cacheDir, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public void CleanupDrives()
+    {
+        ReleaseResources();
+        DeleteTracked(seed: false);
     }
 
     /// <inheritdoc />
     public void Cleanup()
     {
+        ReleaseResources();
+        DeleteTracked(seed: false);
+        DeleteTracked(seed: true);
+    }
+
+    /// <summary>Releases anything a workload keeps running between measurements (e.g. build servers). Must not throw.</summary>
+    protected virtual void ReleaseResources()
+    {
+    }
+
+    private void DeleteTracked(bool seed)
+    {
+        string[] owned;
+        string[] parents;
+        lock (_trackGate)
+        {
+            HashSet<string> ownedSet = seed ? _seedOwned : _driveOwned;
+            HashSet<string> parentSet = seed ? _seedParents : _driveParents;
+            owned = ownedSet.OrderByDescending(d => d.Length).ToArray();
+            parents = parentSet.OrderByDescending(d => d.Length).ToArray();
+            ownedSet.Clear();
+            parentSet.Clear();
+        }
+
         // Delete the directories THIS benchmark owns (deepest first so parents are empty when removed).
-        foreach (string dir in _ownedDirectories.OrderByDescending(d => d.Length).ToArray())
+        foreach (string dir in owned)
         {
             DeleteTree(dir);
         }
 
-        _ownedDirectories.Clear();
-
-        // F11: shared FIXED PARENTS may still hold a concurrently-running sibling benchmark's fixtures —
-        // remove each only if it is now empty, never wholesale, so we never destroy another benchmark's
-        // (or a pre-existing) data.
-        foreach (string parent in _sharedParents.OrderByDescending(d => d.Length).ToArray())
+        // F11: shared FIXED PARENTS may still hold a sibling benchmark's fixtures — remove each only if it
+        // is now empty, never wholesale, so we never destroy another benchmark's (or pre-existing) data.
+        foreach (string parent in parents)
         {
             TryRemoveIfEmpty(parent);
         }
+    }
 
-        _sharedParents.Clear();
+    private static long? FreeBytes(string root)
+    {
+        try
+        {
+            var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(root)) ?? root);
+            return drive.IsReady ? drive.AvailableFreeSpace : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>Seeds the bounded fixture(s) once. Throw <see cref="WorkloadUnavailableException"/> to skip.</summary>
@@ -195,24 +247,30 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         CopyDirectory(seedCache, cacheDir);
     }
 
-    /// <summary>Records a run-owned directory to delete wholesale at <see cref="Cleanup"/>.</summary>
-    protected void Track(string directory)
+    /// <summary>Records a directory this benchmark may delete wholesale: with the seed, or with the per-drive run data.</summary>
+    private void Track(string directory, bool seed)
     {
         if (!string.IsNullOrEmpty(directory))
         {
-            _ownedDirectories.Add(directory);
+            lock (_trackGate)
+            {
+                (seed ? _seedOwned : _driveOwned).Add(directory);
+            }
         }
     }
 
     /// <summary>
-    /// F11: records a shared FIXED PARENT directory. At <see cref="Cleanup"/> it is removed only if it
-    /// has become empty (never deleted wholesale), so a sibling benchmark's fixtures are never destroyed.
+    /// F11: records a shared FIXED PARENT directory. At cleanup it is removed only if it has become
+    /// empty (never deleted wholesale), so a sibling benchmark's fixtures are never destroyed.
     /// </summary>
-    protected void TrackSharedParent(string directory)
+    private void TrackParent(string directory, bool seed)
     {
         if (!string.IsNullOrEmpty(directory))
         {
-            _sharedParents.Add(directory);
+            lock (_trackGate)
+            {
+                (seed ? _seedParents : _driveParents).Add(directory);
+            }
         }
     }
 
@@ -346,26 +404,38 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         Directory.CreateDirectory(directory);
     }
 
-    /// <summary>Recursively copies <paramref name="source"/> into <paramref name="destination"/>, optionally skipping directories by name.</summary>
+    /// <summary>
+    /// Recursively copies <paramref name="source"/> into <paramref name="destination"/>, optionally
+    /// skipping directories by name. Directories are created first, then files are copied in parallel
+    /// (thousands of small cache files copy several times faster that way); content and timestamps are
+    /// identical to a sequential copy, so the result is the same cold, just-written tree.
+    /// </summary>
     protected static void CopyDirectory(string source, string destination, Func<string, bool>? skipDirectory = null)
     {
-        Directory.CreateDirectory(destination);
-
-        foreach (string file in Directory.EnumerateFiles(source))
+        var files = new List<(string From, string To)>();
+        var pending = new Stack<(string From, string To)>();
+        pending.Push((source, destination));
+        while (pending.Count > 0)
         {
-            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: true);
-        }
-
-        foreach (string sub in Directory.EnumerateDirectories(source))
-        {
-            string name = Path.GetFileName(sub);
-            if (skipDirectory is not null && skipDirectory(name))
+            (string from, string to) = pending.Pop();
+            Directory.CreateDirectory(to);
+            foreach (string file in Directory.EnumerateFiles(from))
             {
-                continue;
+                files.Add((file, Path.Combine(to, Path.GetFileName(file))));
             }
 
-            CopyDirectory(sub, Path.Combine(destination, name), skipDirectory);
+            foreach (string sub in Directory.EnumerateDirectories(from))
+            {
+                string name = Path.GetFileName(sub);
+                if (skipDirectory is null || !skipDirectory(name))
+                {
+                    pending.Push((sub, Path.Combine(to, name)));
+                }
+            }
         }
+
+        int workers = Math.Clamp(Environment.ProcessorCount / 2, 2, 8);
+        Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = workers }, f => File.Copy(f.From, f.To, overwrite: true));
     }
 
     /// <summary>Robustly deletes a directory tree, clearing read-only attributes (git pack files) and retrying once. Never throws.</summary>

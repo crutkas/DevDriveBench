@@ -125,6 +125,7 @@ public sealed class ComparisonRow : Grid
         Opacity = t.Status switch
         {
             TestStatus.Pending => 0.32,
+            TestStatus.Ready => 0.7,
             TestStatus.Skipped => 0.55,
             _ => 1,
         };
@@ -159,6 +160,7 @@ public sealed class ComparisonRow : Grid
         }
 
         _status.Text = Status(t, info, now, iterations);
+        _status.Foreground = t.Status == TestStatus.Ready ? Theme.DevDrive : Theme.Tertiary;
 
         string name = skipped
             ? $"{_test.Name}: skipped, {t.SkipReason}"
@@ -212,6 +214,11 @@ public sealed class ComparisonRow : Grid
         if (t.Status == TestStatus.Done)
         {
             return string.Empty;
+        }
+
+        if (t.Status == TestStatus.Ready)
+        {
+            return t.PrepareSeconds is double s && s >= 0.5 ? $"ready · {Fmt.Clock(s)}" : "ready";
         }
 
         if (t.Status != TestStatus.Running || t.ActivePhase is null)

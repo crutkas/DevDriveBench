@@ -33,7 +33,8 @@ public class BenchRunnerTests
         Assert.Equal(3, result.Advantage!.Value, 6);
         Assert.Equal(3, r.Headline!.Value, 6);
         Assert.Equal(1, git.Prepared);
-        Assert.True(git.CleanedUp >= 1);
+        Assert.Equal(0, git.CleanedUp); // seed kept for the next run
+        Assert.Equal(1, git.CleanedUpDrives);
     }
 
     [Fact]
@@ -88,7 +89,7 @@ public class BenchRunnerTests
 
         Assert.Equal(RunOutcome.Cancelled, r.Outcome);
         Assert.Equal(RunOutcome.Cancelled, ((RunCompletedEvent)r.Events[^1]).Outcome);
-        Assert.Equal(1, git.CleanedUp);
+        Assert.Equal(1, git.CleanedUpDrives);
     }
 
     [Fact]
@@ -112,6 +113,110 @@ public class BenchRunnerTests
         {
             Assert.True(r.Events[i].T >= r.Events[i - 1].T);
         }
+    }
+
+    [Fact]
+    public async Task PrepareAheadThenRunsGoStraightToMeasuring()
+    {
+        var git = new FakeWorkload("git", 4, 2);
+        var runner = Create(git);
+        BenchPlan plan = Plan with { Groups = new[] { TestCatalog.GitClone, TestCatalog.DiskGroup } };
+
+        RunRecording prep = await runner.PrepareAsync(plan);
+        Assert.Equal(SessionKind.Prepare, prep.Info.Session);
+        Assert.Single(prep.Events.OfType<PhaseStartedEvent>(), p => p.Phase == RunPhase.Prepare);
+        Assert.Contains(prep.Events, e => e is TestPreparedEvent { TestId: TestCatalog.GitClone, Reused: false });
+        Assert.Equal(4, prep.Events.OfType<TestPreparedEvent>().Count(e => e.TestId.StartsWith("disk", StringComparison.Ordinal)));
+        Assert.Empty(prep.Events.OfType<MeasurementEvent>());
+        Assert.True(runner.HasPreparedSeeds);
+
+        RunState state = Fold(prep.Events);
+        Assert.All(state.Tests, t => Assert.Equal(TestStatus.Ready, t.Status));
+
+        RunRecording first = await runner.RunAsync(plan);
+        RunRecording second = await runner.RunAsync(plan);
+        foreach (RunRecording run in new[] { first, second })
+        {
+            Assert.True(run.Info.PreparedAhead);
+            Assert.DoesNotContain(run.Events, e => e is PhaseStartedEvent { Phase: RunPhase.Prepare });
+            Assert.Equal(2, run.Events.OfType<MeasurementEvent>().Count(m => m.TestId == TestCatalog.GitClone));
+        }
+
+        Assert.Equal(1, git.Prepared);
+        Assert.Equal(0, git.CleanedUp);
+        Assert.Equal(2, git.CleanedUpDrives);
+
+        // A second Prepare reuses what is already there.
+        RunRecording again = await runner.PrepareAsync(plan);
+        Assert.Contains(again.Events, e => e is TestPreparedEvent { TestId: TestCatalog.GitClone, Reused: true });
+        Assert.Equal(1, git.Prepared);
+
+        runner.ReleasePrepared();
+        Assert.False(runner.HasPreparedSeeds);
+        Assert.Equal(1, git.CleanedUp);
+    }
+
+    [Fact]
+    public async Task GitFixtureSizeAndToolChangesInvalidateThePreparation()
+    {
+        var git = new FakeWorkload("git", 4, 2);
+        var dotnet = new FakeWorkload("dotnet", 4, 2);
+        var runner = Create(git, dotnet);
+        BenchPlan plan = Plan with { Groups = new[] { TestCatalog.GitClone, TestCatalog.DotnetBuild }, Profile = WorkloadProfile.Thorough };
+        await runner.PrepareAsync(plan);
+
+        // Quick git fixture is a different seed; dotnet is unaffected by the profile.
+        RunRecording quick = await runner.RunAsync(plan with { Profile = WorkloadProfile.Quick });
+        Assert.Equal(2, git.Prepared);
+        Assert.Equal(1, git.CleanedUp);
+        Assert.Equal(1, dotnet.Prepared);
+        Assert.Single(quick.Events.OfType<PhaseStartedEvent>(), p => p.Phase == RunPhase.Prepare && p.TestId == TestCatalog.GitClone);
+
+        // A different dotnet SDK means a different seed.
+        IReadOnlyList<TestDescriptor> newSdk = runner.DescribeTests(WorkloadProfile.Quick)
+            .Select(t => t.Group == TestCatalog.DotnetBuild ? t with { ToolVersion = "11.0.100" } : t)
+            .ToArray();
+        Assert.False(runner.IsPrepared(newSdk.Single(t => t.Group == TestCatalog.DotnetBuild), WorkloadProfile.Quick));
+        await runner.RunAsync(plan with { Profile = WorkloadProfile.Quick }, tests: newSdk);
+        Assert.Equal(2, dotnet.Prepared);
+    }
+
+    [Fact]
+    public async Task FailedPrepareIsNotKept()
+    {
+        var dotnet = new FakeWorkload("dotnet", 1, 1) { PrepareThrows = new WorkloadUnavailableException("no network") };
+        var runner = Create(dotnet);
+        RunRecording prep = await runner.PrepareAsync(Plan with { Groups = new[] { TestCatalog.DotnetBuild } });
+
+        Assert.Equal("no network", prep.Events.OfType<TestSkippedEvent>().Single().Reason);
+        Assert.False(runner.HasPreparedSeeds);
+        Assert.Equal(1, dotnet.CleanedUp);
+    }
+
+    [Fact]
+    public async Task StageTimingSeparatesMeasuredTimeFromGaps()
+    {
+        var git = new FakeWorkload("git", 0.05, 0.05);
+        RunRecording r = await Create(git).RunAsync(Plan with { Groups = new[] { TestCatalog.GitClone } });
+        StageTiming timing = StageTiming.From(r.Events);
+
+        Assert.Equal(2, timing.Spans.Count);
+        Assert.Equal(timing.Spans.Count + 1, timing.Gaps.Count);
+        Assert.Equal("start", timing.Gaps[0].After);
+        Assert.Equal("end", timing.Gaps[^1].Before);
+        Assert.InRange(timing.Measured, 0, timing.Total);
+        Assert.Equal(timing.Total - timing.Measured, timing.DeadTime, 6);
+    }
+
+    private static RunState Fold(IEnumerable<BenchEvent> events)
+    {
+        var state = new RunState();
+        foreach (BenchEvent e in events)
+        {
+            state.Apply(e);
+        }
+
+        return state;
     }
 
     [Fact]
@@ -216,6 +321,10 @@ public class BenchRunnerTests
             TimedSectionCompleted?.Invoke(value);
             return value;
         }
+
+        public int CleanedUpDrives { get; private set; }
+
+        public void CleanupDrives() => CleanedUpDrives++;
 
         public void Cleanup() => CleanedUp++;
     }

@@ -11,6 +11,7 @@
 
     <Page.KeyboardAccelerators>
         <KeyboardAccelerator Key="F5" Invoked="OnRunAccelerator" />
+        <KeyboardAccelerator Key="F6" Invoked="OnPrepareAccelerator" />
         <KeyboardAccelerator Key="F11" Invoked="OnFullScreenAccelerator" />
         <KeyboardAccelerator Key="Escape" Invoked="OnStopAccelerator" />
     </Page.KeyboardAccelerators>
@@ -213,12 +214,53 @@
 
                                 <HyperlinkButton
                                     Margin="-12,6,0,0"
+                                    Command="{x:Bind ViewModel.ClearPreparedCommand, Mode=OneTime}"
+                                    Content="Delete prepared fixtures" />
+                                <HyperlinkButton
+                                    Margin="-12,-6,0,0"
                                     Command="{x:Bind ViewModel.OpenRunsFolderCommand, Mode=OneTime}"
                                     Content="Open runs folder (JSON + CSV)" />
                             </StackPanel>
                         </Flyout>
                     </Button.Flyout>
                 </Button>
+
+                <Grid VerticalAlignment="Center">
+                    <Button
+                        x:Name="PrepareButton"
+                        MinWidth="112"
+                        AutomationProperties.Name="Prepare"
+                        Command="{x:Bind ViewModel.PrepareCommand, Mode=OneTime}"
+                        IsEnabled="{x:Bind ViewModel.CanPrepare, Mode=OneWay}"
+                        ToolTipService.ToolTip="Prepare every test's fixture now (clones, package downloads) so Run goes straight to measuring"
+                        Visibility="{x:Bind ViewModel.ShowPrepareButton, Mode=OneWay}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <FontIcon FontSize="14" Glyph="&#xE896;" />
+                            <TextBlock Text="Prepare" />
+                        </StackPanel>
+                    </Button>
+                    <StackPanel
+                        x:Name="ReadyChip"
+                        MinWidth="112"
+                        Padding="12,0"
+                        VerticalAlignment="Center"
+                        AutomationProperties.AutomationId="ReadyChip"
+                        AutomationProperties.Name="Prepared, ready to run"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        ToolTipService.ToolTip="Fixtures prepared: Run goes straight to measuring"
+                        Visibility="{x:Bind ViewModel.IsPrepared, Mode=OneWay}">
+                        <FontIcon
+                            FontSize="16"
+                            Foreground="{ThemeResource DevDriveBrush}"
+                            Glyph="&#xE73E;" />
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            FontWeight="SemiBold"
+                            Foreground="{ThemeResource DevDriveBrush}"
+                            Text="Ready" />
+                    </StackPanel>
+                </Grid>
 
                 <Button
                     x:Name="RunButton"

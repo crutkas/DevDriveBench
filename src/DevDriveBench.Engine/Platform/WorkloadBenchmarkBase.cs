@@ -1,5 +1,6 @@
 // Ported from crutkas/devdrive (branch crutkas-drive-space-analyzer), MIT License.
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using DevDriveBench.Engine.Abstractions;
 using DevDriveBench.Engine.Model;
 
@@ -514,12 +515,12 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
 
         if (result.TimedOut)
         {
-            throw new WorkloadUnavailableException($"{what} timed out");
+            throw new WorkloadUnavailableException($"{what} timed out{FailureDetails(result)}");
         }
 
         if (result.ExitCode != 0)
         {
-            throw new WorkloadUnavailableException($"{what} failed (exit {result.ExitCode}){FirstLine(result)}");
+            throw new WorkloadUnavailableException($"{what} failed (exit {result.ExitCode}){FailureDetails(result)}");
         }
     }
 
@@ -651,24 +652,45 @@ public abstract class WorkloadBenchmarkBase : IWorkloadBenchmark
         }
     }
 
-    private static string FirstLine(ProcessRunResult result)
+    /// <summary>Keeps an actionable first line and the complete captured output for recordings and tooltips.</summary>
+    protected static string FailureDetails(ProcessRunResult result)
     {
-        string source = !string.IsNullOrWhiteSpace(result.StandardError) ? result.StandardError : result.StandardOutput;
-        if (string.IsNullOrWhiteSpace(source))
+        string stderr = result.StandardError.Trim();
+        string stdout = result.StandardOutput.Trim();
+        string[] lines = (stderr + "\n" + stdout)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length == 0)
         {
             return string.Empty;
         }
 
-        string? line = source
-            .Replace("\r", string.Empty)
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault();
-
-        if (string.IsNullOrEmpty(line))
+        // MSBuild normally writes errors to stdout, after successful project output. Do not let an
+        // earlier success line (or a warning on stderr) hide the actual build failure.
+        const string errorPattern = @"\berror(?:\s+[A-Za-z]+\d+)?\s*:";
+        string summary = lines.FirstOrDefault(line =>
+            Regex.IsMatch(line, errorPattern, RegexOptions.IgnoreCase)) ?? lines[0];
+        const int summaryLimit = 240;
+        if (summary.Length > summaryLimit)
         {
-            return string.Empty;
+            // A long project path can otherwise consume the entire summary before the error text.
+            Match error = Regex.Match(summary, errorPattern, RegexOptions.IgnoreCase);
+            if (error.Success && error.Index > 0)
+            {
+                summary = summary[error.Index..];
+            }
+
+            if (summary.Length > summaryLimit)
+            {
+                summary = summary[..summaryLimit] + "…";
+            }
         }
 
-        return line.Length > 160 ? $": {line[..160]}…" : $": {line}";
+        string details = string.IsNullOrEmpty(stderr) ? string.Empty : $"\nStandard error:\n{stderr}";
+        if (!string.IsNullOrEmpty(stdout))
+        {
+            details += $"\nStandard output:\n{stdout}";
+        }
+
+        return $": {summary}{details}";
     }
 }

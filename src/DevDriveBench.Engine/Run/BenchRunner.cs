@@ -39,44 +39,37 @@ public sealed class BenchRunner
 {
     private const double ActivityIntervalSeconds = 0.25;
 
-    private readonly IDiskBenchmark _disk;
     private readonly IReadOnlyList<IWorkloadBenchmark> _workloads;
     private readonly IToolProbe _tools;
     private readonly Func<DriveDescriptor, DriveDescriptor, IActivitySource?> _activityFactory;
     private readonly Func<MachineInfo> _machine;
     private readonly Func<string, string?> _filterInfo;
-    private readonly DiskBenchmarkOptions _diskOptions;
     private readonly Func<string> _seedRootFactory;
     private readonly Stopwatch _clock = new();
     private readonly Dictionary<string, string> _prepared = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _preparedGate = new();
 
     public BenchRunner(
-        IDiskBenchmark disk,
         IReadOnlyList<IWorkloadBenchmark> workloads,
         IToolProbe tools,
         Func<DriveDescriptor, DriveDescriptor, IActivitySource?>? activityFactory = null,
         Func<MachineInfo>? machine = null,
         Func<string, string?>? filterInfo = null,
-        DiskBenchmarkOptions? diskOptions = null,
         Func<string>? seedRootFactory = null)
     {
-        _disk = disk ?? throw new ArgumentNullException(nameof(disk));
         _workloads = workloads ?? throw new ArgumentNullException(nameof(workloads));
         _tools = tools ?? throw new ArgumentNullException(nameof(tools));
         _activityFactory = activityFactory ?? ((_, _) => null);
         _machine = machine ?? (() => new MachineInfo());
         _filterInfo = filterInfo ?? (_ => null);
-        _diskOptions = diskOptions ?? DiskBenchmarkOptions.Default;
         _seedRootFactory = seedRootFactory ?? (() => Path.Combine(Path.GetTempPath(), WorkloadPaths.SeedFolderName));
     }
 
-    /// <summary>Wires the real disk benchmark, workloads, tool probe, and performance counters.</summary>
+    /// <summary>Wires the developer workloads, tool probe, and performance counters.</summary>
     public static BenchRunner CreateDefault()
     {
         var processRunner = new WorkloadProcessRunner();
         return new BenchRunner(
-            new DiskBenchmark(),
             WorkloadBenchmarkCatalog.CreateDefault(processRunner),
             new ToolProbe(processRunner),
             (system, dev) => new PerfCounterActivitySource(system, dev),
@@ -99,12 +92,6 @@ public sealed class BenchRunner
         var all = new List<TestDescriptor>();
         foreach (string group in TestCatalog.GroupOrder)
         {
-            if (group == TestCatalog.DiskGroup)
-            {
-                all.AddRange(TestCatalog.DiskTests(_diskOptions));
-                continue;
-            }
-
             IWorkloadBenchmark? workload = _workloads.FirstOrDefault(w => TestCatalog.WorkloadId(w.RequiredTool) == group);
             if (workload is null)
             {
@@ -248,7 +235,9 @@ public sealed class BenchRunner
 
         IReadOnlyList<TestDescriptor> described = describedTests ?? DescribeTests(plan.Profile);
         var groups = new HashSet<string>(plan.Groups ?? TestCatalog.GroupOrder, StringComparer.OrdinalIgnoreCase);
-        TestDescriptor[] tests = described.Where(t => groups.Contains(t.Group)).ToArray();
+        TestDescriptor[] tests = described
+            .Where(t => t.IsWorkload && groups.Contains(t.Group) && TestCatalog.GroupOrder.Contains(t.Group))
+            .ToArray();
 
         var info = new RunInfo
         {
@@ -285,23 +274,6 @@ public sealed class BenchRunner
                 TestDescriptor[] rows = tests.Where(t => t.Group == group).ToArray();
                 if (rows.Length == 0)
                 {
-                    continue;
-                }
-
-                if (group == TestCatalog.DiskGroup)
-                {
-                    if (kind == SessionKind.Prepare)
-                    {
-                        foreach (TestDescriptor row in rows)
-                        {
-                            Emit(new TestPreparedEvent(row.Id, 0));
-                        }
-                    }
-                    else
-                    {
-                        RunDisk(rows, plan, iterations, Emit, ct);
-                    }
-
                     continue;
                 }
 
@@ -523,43 +495,6 @@ public sealed class BenchRunner
         }
     }
 
-    private void RunDisk(TestDescriptor[] rows, BenchPlan plan, int iterations, Action<BenchEvent> emit, CancellationToken ct)
-    {
-        foreach (TestDescriptor row in rows)
-        {
-            emit(new TestStartedEvent(row.Id));
-        }
-
-        var wanted = new HashSet<string>(rows.Select(r => r.Id), StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            foreach ((DriveRole role, string root) in new[] { (DriveRole.System, plan.SystemDrive.Root), (DriveRole.Dev, plan.DevDrive.Root) })
-            {
-                for (int i = 1; i <= iterations; i++)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    _disk.Run(root, _diskOptions, new DiskObserver(emit, wanted, role, i), ct);
-                }
-            }
-
-            foreach (TestDescriptor row in rows)
-            {
-                emit(new TestCompletedEvent(row.Id));
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            foreach (TestDescriptor row in rows)
-            {
-                emit(new TestSkippedEvent(row.Id, ex.Message));
-            }
-        }
-    }
-
     /// <summary>
     /// Samples activity on a dedicated background thread. Counter creation can take seconds the first
     /// time in a process, so it happens here rather than delaying the run; samples simply start later.
@@ -602,33 +537,4 @@ public sealed class BenchRunner
         }
     }
 
-    private sealed class DiskObserver(Action<BenchEvent> emit, HashSet<string> wanted, DriveRole role, int iteration) : IDiskBenchmarkObserver
-    {
-        public void MetricStarted(DiskMetric metric)
-        {
-            string id = TestCatalog.DiskId(metric);
-            if (wanted.Contains(id))
-            {
-                emit(new PhaseStartedEvent(id, RunPhase.Measure, role, iteration));
-            }
-        }
-
-        public void Sample(DiskMetric metric, double fraction, double value)
-        {
-            string id = TestCatalog.DiskId(metric);
-            if (wanted.Contains(id))
-            {
-                emit(new SampleEvent(id, role, iteration, Math.Round(fraction, 3), Math.Round(value, 1)));
-            }
-        }
-
-        public void MetricCompleted(DiskMetric metric, double value)
-        {
-            string id = TestCatalog.DiskId(metric);
-            if (wanted.Contains(id))
-            {
-                emit(new MeasurementEvent(id, role, iteration, Math.Round(value, 2)));
-            }
-        }
-    }
 }

@@ -68,10 +68,10 @@ public sealed record MachineInfo
 /// <summary>One result row: what it measures, its unit and direction, and whether it can run here.</summary>
 public sealed record TestDescriptor
 {
-    /// <summary>Stable id, e.g. <c>git-clone</c> or <c>disk-seq-read</c>.</summary>
+    /// <summary>Stable workload id, e.g. <c>git-clone</c>; older recordings may include removed disk tests.</summary>
     public string Id { get; init; } = string.Empty;
 
-    /// <summary>Selection group: the workload id, or <c>disk</c> for the four synthetic passes.</summary>
+    /// <summary>Selection group: the workload id (or <c>disk</c> in older recordings).</summary>
     public string Group { get; init; } = string.Empty;
 
     /// <summary>True for real developer workloads (these drive the headline).</summary>
@@ -86,12 +86,12 @@ public sealed record TestDescriptor
     /// <summary>Full methodology detail (kept in the data, not on screen).</summary>
     public string Detail { get; init; } = string.Empty;
 
-    /// <summary>Unit of every value: <c>s</c>, <c>MB/s</c>, or <c>IOPS</c>.</summary>
+    /// <summary>Unit of every value: <c>s</c>, or <c>MB/s</c> / <c>IOPS</c> in older recordings.</summary>
     public string Unit { get; init; } = string.Empty;
 
     public Better Better { get; init; }
 
-    /// <summary>Tool the workload needs (null for disk passes).</summary>
+    /// <summary>Tool the workload needs (may be null in older recordings).</summary>
     public string? RequiredTool { get; init; }
 
     /// <summary>Detected tool version, when found.</summary>

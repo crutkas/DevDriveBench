@@ -18,6 +18,19 @@ cd src\DevDriveBench
 winapp run .
 ```
 
+For a Release build, run from the repository root (use `ARM64` / `arm64` instead of
+`x64` on an ARM64 machine):
+
+```powershell
+dotnet build .\src\DevDriveBench\DevDriveBench.csproj -c Release -p:Platform=x64 -r win-x64
+winapp run .\src\DevDriveBench\DevDriveBench.csproj -c Release --arch x64 --no-build --detach
+```
+
+The app is packaged: use `winapp run` to register its package identity and launch it,
+not the raw build-output EXE. Once registered, **Dev Drive Bench** is also available
+from Start. Release builds keep trimming disabled because WinRT collection
+marshalling and recording JSON serialization require reflection metadata.
+
 | Key | Action |
 |-----|--------|
 | `F6` | Prepare |
@@ -54,7 +67,6 @@ winapp run .
 
 | Test | What is timed | Needs |
 |------|---------------|-------|
-| Disk I/O | 128 MiB sequential write/read (1 MiB blocks), 2,000 random 4K reads/writes at QD1, unbuffered + write-through | — |
 | git clone | `git clone --no-hardlinks` of a local 15,000-file repo (1,200 with Quick) | git |
 | npm ci | offline `npm ci` of microsoft/vscode-eslint; `node_modules` on the code drive, `npm_config_cache` on the packages drive | npm, network for first prep |
 | dotnet build | `dotnet build` of dotnet/eShop on .NET 10 (`eShop.Web.slnf`: web app, services, Aspire AppHost and tests; pinned commit); output on the code drive, `NUGET_PACKAGES` on the packages drive, build servers cold each run | dotnet, network for first prep |
@@ -66,7 +78,13 @@ Build Tools with the C++ workload — plus the ARM64 toolset on ARM64 — then r
 `rustup default stable`). Installs request the OS architecture (`--architecture arm64` on ARM64),
 so an ARM64 machine never gets an emulated toolchain by default. Installers may ask for elevation.
 The app re-reads PATH afterwards, so the test is ready without a restart. A test that fails (no
-network, low disk) shows as a skipped row with the reason.
+network, low disk) shows as a skipped row with the reason. Hover the reason for full
+failure details; saved recordings retain the command output for diagnosis.
+
+The .NET fixture inherits the machine's and user's configured NuGet sources instead
+of eShop's checked-in source overrides. Corporate feeds work when configured; a normal
+public-feed setup works unchanged. Preparation does not probe nuget.org directly or
+change your NuGet configuration. Measured restores remain offline against staged caches.
 
 **Methodology.** Each test prepares its fixture once (Prepare, or the start of a Run), then runs N
 iterations on the system drive and N on the Dev Drive. Each iteration copies the source into a fresh
@@ -84,9 +102,11 @@ single run is reported. Build servers are shut down before every timed `dotnet b
 while that iteration's files are copied), so the second drive never inherits warm MSBuild/compiler
 processes from the first. Iterations' files are deleted once the run's result is on screen (or
 sooner if a drive runs low), not between timed steps. The headline is the median advantage
-across workloads; synthetic disk numbers are shown separately and never feed the headline.
+across workloads. Only developer workloads are run; the live disk I/O chart observes their
+activity rather than running a separate synthetic disk benchmark. Older recordings remain readable,
+but their removed synthetic result rows are not displayed.
 
-The disk pass runs first, while the machine is quiet. The git fixture is written with
+The git fixture is written with
 `git fast-import` (one packed bare repo, no working tree), which keeps preparation to about a second
 even where on-open antivirus scanning of thousands of new files is slow.
 
@@ -110,7 +130,7 @@ Every Live run is saved to `Documents\DevDriveBench\Runs`:
 Headless data gathering uses the same engine and produces the same files:
 
 ```powershell
-dotnet run --project src\DevDriveBench.Cli -- --runs 5 --tests disk,git-clone
+dotnet run --project src\DevDriveBench.Cli -- --runs 5 --tests git-clone,npm-ci
 dotnet run --project src\DevDriveBench.Cli -- --prepare   # stage flow: prepare, then run; prints dead time between timed steps
 dotnet run --project src\DevDriveBench.Cli -- --prepare --packages both   # C drive, then optimal drive; prints all three scenarios
 dotnet run --project src\DevDriveBench.Cli -- --timing <recording.json>   # same dead-time report for any saved run

@@ -84,7 +84,7 @@ public sealed record TestStartedEvent(string TestId) : BenchEvent;
 /// <summary>A test entered a phase on a drive. <see cref="Iteration"/> is 1-based (0 when not per-iteration).</summary>
 public sealed record PhaseStartedEvent(string TestId, RunPhase Phase, DriveRole Drive, int Iteration) : BenchEvent;
 
-/// <summary>An instantaneous in-flight reading (disk passes): value in the test's unit, fraction = pass progress.</summary>
+/// <summary>A legacy disk-pass sample, retained for loading older recordings.</summary>
 public sealed record SampleEvent(string TestId, DriveRole Drive, int Iteration, double Fraction, double Value) : BenchEvent;
 
 /// <summary>One finished, raw per-iteration result in the test's unit.</summary>

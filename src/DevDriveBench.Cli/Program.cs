@@ -4,7 +4,7 @@ using DevDriveBench.Engine.Platform;
 using DevDriveBench.Engine.Run;
 
 // Headless runner for data gathering: same engine, same recordings (replayable in the app).
-//   devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,...] [--dev D:] [--out DIR] [--prepare] [--packages optimal|c|both] [--list] [--timing FILE]
+//   devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,npm-ci,...] [--dev D:] [--out DIR] [--prepare] [--packages optimal|c|both] [--list] [--timing FILE]
 
 var options = Args.Parse(args);
 
@@ -12,8 +12,14 @@ var options = Args.Parse(args);
 EnvironmentRefresher.RefreshPath();
 if (options.Help)
 {
-    Console.WriteLine("devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,disk,npm-ci,dotnet-build,cargo-build] [--dev D:] [--out DIR] [--prepare] [--packages optimal|c|both] [--list] [--timing RECORDING.json]");
+    Console.WriteLine("devdrivebench [--runs N] [--profile quick|thorough] [--tests git-clone,npm-ci,dotnet-build,cargo-build] [--dev D:] [--out DIR] [--prepare] [--packages optimal|c|both] [--list] [--timing RECORDING.json]");
     return 0;
+}
+
+if (options.Tests is not null && options.Tests.Any(t => !TestCatalog.GroupOrder.Contains(t, StringComparer.OrdinalIgnoreCase)))
+{
+    Console.Error.WriteLine($"Unknown test group. Choose from: {string.Join(", ", TestCatalog.GroupOrder)}.");
+    return 2;
 }
 
 if (options.Timing is string saved)
@@ -169,10 +175,10 @@ static void Print(BenchEvent e)
     string? line = e switch
     {
         PhaseStartedEvent p when p.Phase is RunPhase.Prepare or RunPhase.Cleanup => $"{e.T,8:0.0}  {p.TestId} {p.Phase.ToString().ToLowerInvariant()}",
-        PhaseStartedEvent p when p.Phase == RunPhase.Measure && !p.TestId.StartsWith("disk", StringComparison.Ordinal) => $"{e.T,8:0.0}  {p.TestId} {p.Drive} run {p.Iteration}",
+        PhaseStartedEvent p when p.Phase == RunPhase.Measure => $"{e.T,8:0.0}  {p.TestId} {p.Drive} run {p.Iteration}",
         MeasurementEvent m => $"{e.T,8:0.0}  {m.TestId} {m.Drive} run {m.Iteration} = {m.Value:0.###}",
         TestSkippedEvent s => $"{e.T,8:0.0}  {s.TestId} skipped: {s.Reason}",
-        TestPreparedEvent p when !p.TestId.StartsWith("disk", StringComparison.Ordinal) => $"{e.T,8:0.0}  {p.TestId} {(p.Reused ? "already prepared" : $"prepared in {p.Seconds:0.0}s")}",
+        TestPreparedEvent p => $"{e.T,8:0.0}  {p.TestId} {(p.Reused ? "already prepared" : $"prepared in {p.Seconds:0.0}s")}",
         _ => null,
     };
     if (line is not null)

@@ -12,7 +12,7 @@ public class InstallerTests
         Assert.Equal("Git.Git", Assert.Single(InstallCatalog.For(TestCatalog.GitClone)).Id);
         Assert.Equal("OpenJS.NodeJS.LTS", Assert.Single(InstallCatalog.For(TestCatalog.NpmCi)).Id);
         Assert.Equal("Microsoft.DotNet.SDK.10", Assert.Single(InstallCatalog.For(TestCatalog.DotnetBuild)).Id);
-        Assert.Empty(InstallCatalog.For(TestCatalog.DiskGroup));
+        Assert.Empty(InstallCatalog.For("disk"));
 
         // cargo needs the MSVC linker, installed before rustup; rustup then needs a default toolchain.
         IReadOnlyList<WingetPackage> cargo = InstallCatalog.For(TestCatalog.CargoBuild);

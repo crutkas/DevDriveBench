@@ -93,16 +93,42 @@ public class BenchRunnerTests
     }
 
     [Fact]
-    public async Task DiskObserverEventsMapToRows()
+    public async Task DefaultPlanRunsOnlyDeveloperWorkloads()
     {
-        RunRecording r = await Create().RunAsync(Plan with { Iterations = 2, Groups = new[] { TestCatalog.DiskGroup } });
+        var runner = Create(
+            new FakeWorkload("git", 4, 2),
+            new FakeWorkload("npm", 4, 2),
+            new FakeWorkload("dotnet", 4, 2),
+            new FakeWorkload("cargo", 4, 2));
+        IReadOnlyList<TestDescriptor> tests = runner.DescribeTests(WorkloadProfile.Thorough);
+        Assert.Equal(new[] { TestCatalog.GitClone, TestCatalog.NpmCi, TestCatalog.DotnetBuild, TestCatalog.CargoBuild }, TestCatalog.GroupOrder);
+        Assert.Equal(TestCatalog.GroupOrder, tests.Select(t => t.Group));
+        Assert.All(tests, t => Assert.True(t.IsWorkload));
 
+        RunRecording r = await runner.RunAsync(Plan);
         Assert.Equal(4, r.Results.Count);
-        Assert.Equal(4 * 2 * 2, r.Events.OfType<MeasurementEvent>().Count());
-        Assert.Contains(r.Events, e => e is SampleEvent s && s.TestId == TestCatalog.DiskSeqRead);
-        TestResult read = r.Results.Single(x => x.TestId == TestCatalog.DiskSeqRead);
-        Assert.Equal(2, read.Advantage!.Value, 6);
-        Assert.Null(r.Headline);
+        Assert.Equal(8, r.Events.OfType<MeasurementEvent>().Count());
+        Assert.All(r.Info.Tests, t => Assert.True(t.IsWorkload));
+        Assert.DoesNotContain(r.Events, e => e is SampleEvent);
+    }
+
+    [Fact]
+    public async Task RemovedDiskGroupCannotRunEvenWithLegacyDescriptors()
+    {
+        var legacy = new TestDescriptor { Id = "disk-seq-read", Group = "disk", Name = "Sequential read" };
+        var runner = Create();
+        BenchPlan plan = Plan with { Groups = new[] { "disk" } };
+        foreach (RunRecording r in new[]
+        {
+            await runner.PrepareAsync(plan, tests: new[] { legacy }),
+            await runner.RunAsync(plan, tests: new[] { legacy }),
+        })
+        {
+            Assert.Empty(r.Info.Tests);
+            Assert.Empty(r.Results);
+            Assert.Empty(r.Events.OfType<PhaseStartedEvent>());
+            Assert.Empty(r.Events.OfType<MeasurementEvent>());
+        }
     }
 
     [Fact]
@@ -120,13 +146,13 @@ public class BenchRunnerTests
     {
         var git = new FakeWorkload("git", 4, 2);
         var runner = Create(git);
-        BenchPlan plan = Plan with { Groups = new[] { TestCatalog.GitClone, TestCatalog.DiskGroup } };
+        BenchPlan plan = Plan with { Groups = new[] { TestCatalog.GitClone } };
 
         RunRecording prep = await runner.PrepareAsync(plan);
         Assert.Equal(SessionKind.Prepare, prep.Info.Session);
         Assert.Single(prep.Events.OfType<PhaseStartedEvent>(), p => p.Phase == RunPhase.Prepare);
         Assert.Contains(prep.Events, e => e is TestPreparedEvent { TestId: TestCatalog.GitClone, Reused: false });
-        Assert.Equal(4, prep.Events.OfType<TestPreparedEvent>().Count(e => e.TestId.StartsWith("disk", StringComparison.Ordinal)));
+        Assert.Single(prep.Events.OfType<TestPreparedEvent>());
         Assert.Empty(prep.Events.OfType<MeasurementEvent>());
         Assert.True(runner.HasPreparedSeeds);
 
@@ -280,27 +306,11 @@ public class BenchRunnerTests
     private static BenchRunner Create(FakeWorkload workload, string[] missingTools) => Create(new[] { workload }, missingTools);
 
     private static BenchRunner Create(FakeWorkload[] workloads, string[] missingTools) =>
-        new(new FakeDisk(), workloads, new FakeTools(missingTools), seedRootFactory: () => Path.GetTempPath());
+        new(workloads, new FakeTools(missingTools), seedRootFactory: () => Path.GetTempPath());
 
     private sealed class FakeTools(string[] missing) : IToolProbe
     {
         public ToolInfo Detect(string tool) => new(tool, !missing.Contains(tool), "1.0", null);
-    }
-
-    private sealed class FakeDisk : IDiskBenchmark
-    {
-        public DiskBenchmarkResult Run(string driveRoot, DiskBenchmarkOptions options, IDiskBenchmarkObserver? observer = null, CancellationToken cancellationToken = default)
-        {
-            double scale = driveRoot.StartsWith("D", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
-            foreach (DiskMetric metric in Enum.GetValues<DiskMetric>())
-            {
-                observer?.MetricStarted(metric);
-                observer?.Sample(metric, 0.5, 100 * scale);
-                observer?.MetricCompleted(metric, 100 * scale);
-            }
-
-            return new DiskBenchmarkResult { DriveRoot = driveRoot };
-        }
     }
 
     private sealed class FakeWorkload : IWorkloadBenchmark

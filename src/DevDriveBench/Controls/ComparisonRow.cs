@@ -18,7 +18,6 @@ namespace DevDriveBench.Controls;
 public sealed class ComparisonRow : Grid
 {
     private readonly TestDescriptor _test;
-    private readonly bool _compact;
     private readonly string? _packageVariable;
     private readonly TextBlock _name;
     private readonly TextBlock _caption;
@@ -32,15 +31,14 @@ public sealed class ComparisonRow : Grid
     private double _scale;
     private string _automationName = string.Empty;
 
-    public ComparisonRow(TestDescriptor test, bool compact)
+    public ComparisonRow(TestDescriptor test)
     {
         _test = test;
-        _compact = compact;
 
         // Recordings from before package locations lack the variable; the workload still had one.
         _packageVariable = test.PackageVariable ?? (test.IsWorkload ? TestCatalog.PackageVariable(test.Group) : null);
         ColumnSpacing = 24;
-        Padding = compact ? new Thickness(0, 7, 0, 7) : new Thickness(0, 12, 0, 12);
+        Padding = new Thickness(0, 12, 0, 12);
         ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(250) });
         ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(180) });
@@ -49,29 +47,29 @@ public sealed class ComparisonRow : Grid
         _name = new TextBlock
         {
             Text = test.Name,
-            FontSize = compact ? 16 : 21,
+            FontSize = 21,
             FontWeight = FontWeights.SemiBold,
             Foreground = Theme.Primary,
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
         _caption = new TextBlock
         {
-            Text = compact ? test.Caption : test.Caption,
-            FontSize = compact ? 12 : 13,
+            Text = test.Caption,
+            FontSize = 13,
             Foreground = Theme.Tertiary,
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
-        var nameStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Spacing = compact ? 0 : 2 };
+        var nameStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Spacing = 2 };
         nameStack.Children.Add(_name);
         nameStack.Children.Add(_caption);
         Children.Add(nameStack);
 
-        double laneHeight = compact ? 12 : 22;
+        const double laneHeight = 22;
         _systemLane = CreateLane(laneHeight, Theme.SystemDrive, Theme.SystemDriveLive);
         _mixedLane = CreateLane(laneHeight, Theme.DevDriveMixed, Theme.DevDriveLive);
         _devLane = CreateLane(laneHeight, Theme.DevDrive, Theme.DevDriveLive);
         _mixedLane.Visibility = Visibility.Collapsed;
-        _lanes = new StackPanel { Spacing = compact ? 6 : 10, VerticalAlignment = VerticalAlignment.Center };
+        _lanes = new StackPanel { Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
         _lanes.Children.Add(_systemLane);
         _lanes.Children.Add(_mixedLane);
         _lanes.Children.Add(_devLane);
@@ -82,6 +80,7 @@ public sealed class ComparisonRow : Grid
         {
             FontSize = 14,
             Foreground = Theme.Tertiary,
+            TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(34, 0, 0, 0),
             Visibility = Visibility.Collapsed,
@@ -92,8 +91,8 @@ public sealed class ComparisonRow : Grid
         _advantage = new TextBlock
         {
             FontFamily = Theme.NumberFont,
-            FontSize = compact ? 24 : 40,
-            FontWeight = compact ? FontWeights.Normal : FontWeights.SemiLight,
+            FontSize = 40,
+            FontWeight = FontWeights.SemiLight,
             HorizontalAlignment = HorizontalAlignment.Right,
             Foreground = Theme.Secondary,
         };
@@ -129,7 +128,13 @@ public sealed class ComparisonRow : Grid
         bool skipped = t.Status == TestStatus.Skipped;
         _lanes.Visibility = skipped ? Visibility.Collapsed : Visibility.Visible;
         _skip.Visibility = skipped ? Visibility.Visible : Visibility.Collapsed;
-        _skip.Text = skipped ? "skipped · " + t.SkipReason : string.Empty;
+        string skipText = skipped ? "skipped · " + t.SkipReason : string.Empty;
+        if (ToolTipService.GetToolTip(_skip) as string != skipText)
+        {
+            ToolTipService.SetToolTip(_skip, skipped ? skipText : null);
+        }
+
+        _skip.Text = skipText.Split('\n')[0].TrimEnd('\r');
 
         Opacity = t.Status switch
         {
@@ -244,13 +249,7 @@ public sealed class ComparisonRow : Grid
             return null;
         }
 
-        if (_test.Unit == "s")
-        {
-            return Math.Max(0, now - t.ActivePhaseStart);
-        }
-
-        // Disk passes: the bar tracks the instantaneous throughput.
-        return t.LiveSamples.Count > 0 ? t.LiveSamples[^1].Value : 0;
+        return Math.Max(0, now - t.ActivePhaseStart);
     }
 
     private static string Status(TestState t, RunInfo info, double now, int iterations)

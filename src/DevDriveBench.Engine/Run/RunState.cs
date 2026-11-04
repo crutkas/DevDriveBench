@@ -107,8 +107,8 @@ public sealed class RunState
     public TestState? Find(string id) => _byId.TryGetValue(id, out TestState? t) ? t : null;
 
     /// <summary>
-    /// Headline: median Dev Drive advantage across real workloads that produced both values (the
-    /// synthetic disk passes are reported separately and never inflate the headline).
+    /// Headline: median Dev Drive advantage across real workloads that produced both values.
+    /// Removed synthetic tests in older recordings never contribute to the headline.
     /// </summary>
     public double? Headline
     {

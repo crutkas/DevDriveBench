@@ -587,7 +587,7 @@ public sealed partial class MainViewModel : ObservableObject
                 _lastPreparation = recording;
             }
 
-            int prepared = recording.Events.OfType<TestPreparedEvent>().Count(e => !e.TestId.StartsWith(TestCatalog.DiskGroup, StringComparison.Ordinal));
+            int prepared = recording.Events.OfType<TestPreparedEvent>().Count();
             FooterText = recording.Outcome switch
             {
                 RunOutcome.Completed => $"Prepared {prepared} workload{(prepared == 1 ? string.Empty : "s")} in {Fmt(recording.DurationSeconds)} · packages staged on {SystemLetter} and {DevLetter} · Run measures straight away · fixtures are deleted when the app closes",
@@ -827,7 +827,6 @@ public sealed partial class MainViewModel : ObservableObject
         string tool = first.RequiredTool is string t ? $"{t} {first.ToolVersion}".Trim() + " · " + emulated : string.Empty;
         return group switch
         {
-            TestCatalog.DiskGroup => "seconds",
             TestCatalog.GitClone => tool + "offline · seconds",
             _ => tool + "network for first prep · minutes",
         };

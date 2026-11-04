@@ -414,13 +414,6 @@
                 </Grid>
                 <StackPanel x:Name="WorkloadRows" />
 
-                <Grid x:Name="DiskHeader" Margin="0,20,0,2">
-                    <StackPanel Orientation="Horizontal" Spacing="14">
-                        <TextBlock Style="{StaticResource SectionLabelStyle}" Text="DISK I/O" />
-                        <TextBlock Style="{StaticResource SectionHintStyle}" Text="synthetic · throughput · longer is faster" />
-                    </StackPanel>
-                </Grid>
-                <StackPanel x:Name="DiskRows" />
             </StackPanel>
         </ScrollViewer>
 

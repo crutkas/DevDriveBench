@@ -104,7 +104,6 @@ public sealed partial class MainPage : Page
     private void RebuildRows()
     {
         WorkloadRows.Children.Clear();
-        DiskRows.Children.Clear();
         _rows.Clear();
         _io.Clear();
         _cpu.Clear();
@@ -115,11 +114,11 @@ public sealed partial class MainPage : Page
         RunInfo? info = ViewModel.State.Info;
         if (info is not null)
         {
-            foreach (TestDescriptor test in info.Tests)
+            foreach (TestDescriptor test in info.Tests.Where(t => t.IsWorkload))
             {
-                var row = new ComparisonRow(test, compact: !test.IsWorkload);
+                var row = new ComparisonRow(test);
                 _rows[test.Id] = row;
-                (test.IsWorkload ? WorkloadRows : DiskRows).Children.Add(row);
+                WorkloadRows.Children.Add(row);
             }
 
             SystemLetterText.Text = info.SystemDrive.Letter;
@@ -130,7 +129,6 @@ public sealed partial class MainPage : Page
         }
 
         WorkloadHeader.Visibility = WorkloadRows.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        DiskHeader.Visibility = DiskRows.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         _dirtyFrames = 60;
     }
 
@@ -298,7 +296,7 @@ public sealed partial class MainPage : Page
         }
         else
         {
-            int tests = info.Tests.Select(x => x.Group).Distinct().Count();
+            int tests = info.Tests.Where(x => x.IsWorkload).Select(x => x.Group).Distinct().Count();
             string testsText = $"{tests} test{(tests == 1 ? string.Empty : "s")}";
             string runsText = $"{info.Iterations} run{(info.Iterations == 1 ? string.Empty : "s")} per drive";
             text = (ViewModel.IsShowingReplay, ViewModel.IsPrepared) switch

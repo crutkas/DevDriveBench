@@ -19,6 +19,4 @@ internal static class WorkloadPaths
     /// </summary>
     public const string PackagesFolderName = "DevDriveBench.Packages";
 
-    /// <summary>Per-drive folder holding the synthetic disk test's temporary file.</summary>
-    public const string DiskFolderName = "DevDriveBench.Disk";
 }

@@ -90,15 +90,12 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
         RunPrepare(Git($"fetch -q --depth 1 {RepoUrl} {RepoCommit}", _repoSeed), $"could not fetch dotnet/eShop {RepoCommit[..7]}", cancellationToken, FetchTimeoutMs);
         RunPrepare(Git("-c core.longpaths=true checkout -q FETCH_HEAD", _repoSeed), "could not check out dotnet/eShop", cancellationToken, FetchTimeoutMs);
 
-        // eShop's nuget.config clears every source except nuget.org. Where nuget.org can't be reached
-        // (e.g. corporate networks that proxy it), inherit the machine's configured feeds instead. This
-        // only changes where the one-time seed download comes from; measured restores are offline.
-        if (!IsReachable(NuGetOrgIndex))
-        {
-            File.WriteAllText(
-                Path.Combine(_repoSeed, "nuget.config"),
-                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <!-- DevDriveBench: nuget.org unreachable; inherit this machine's NuGet feeds. -->\n  <packageSources />\n</configuration>\n");
-        }
+        // eShop clears the configured feeds in favor of nuget.org. Always inherit the user's/machine's
+        // feeds instead, without first probing a public endpoint that policy may block. This only
+        // affects the one-time seed restore; measured restores still override every feed offline.
+        File.WriteAllText(
+            Path.Combine(_repoSeed, "nuget.config"),
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <!-- DevDriveBench: inherit this machine's NuGet feeds. -->\n  <packageSources />\n</configuration>\n");
 
         // Network step 2/2: warm a seed global-packages folder once. Measured iterations copy it cold
         // onto the test drive and re-restore offline from the copy.
@@ -215,57 +212,18 @@ public sealed class DotnetBuildWorkload : WorkloadBenchmarkBase
     private static WorkloadProcessRequest Git(string arguments, string workingDirectory) =>
         new("git", arguments, workingDirectory, TimeoutMs: FetchTimeoutMs);
 
-    private const string NuGetOrgIndex = "https://api.nuget.org/v3/index.json";
-
-    /// <summary>True when an HTTPS GET of <paramref name="url"/> succeeds within a few seconds.</summary>
-    private static bool IsReachable(string url)
-    {
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
-            using HttpResponseMessage response = http.Send(new HttpRequestMessage(HttpMethod.Get, url));
-            return response.IsSuccessStatusCode;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     /// <summary>
-    /// Builds a concise, honest skip reason from a failed process result — a timeout, or the last
-    /// meaningful stderr/stdout line — instead of guessing "no network".
+    /// Reports the actual error and preserves the complete process output, rather than guessing
+    /// "no network" or retaining only a success-looking project output line.
     /// </summary>
     private static string DescribeProcessFailure(ProcessRunResult result, int timeoutMs)
     {
         if (result.TimedOut)
         {
-            return $"timed out after {timeoutMs / 1000}s";
+            return $"timed out after {timeoutMs / 1000}s{FailureDetails(result)}";
         }
 
-        string detail = LastMeaningfulLine(result.StandardError);
-        if (string.IsNullOrEmpty(detail))
-        {
-            detail = LastMeaningfulLine(result.StandardOutput);
-        }
-
-        return string.IsNullOrEmpty(detail) ? $"exit {result.ExitCode}" : $"exit {result.ExitCode} — {detail}";
-    }
-
-    /// <summary>Returns the last non-blank line of <paramref name="text"/>, trimmed and length-capped.</summary>
-    private static string LastMeaningfulLine(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return string.Empty;
-        }
-
-        string line = text
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .LastOrDefault(l => l.Length > 0) ?? string.Empty;
-
-        const int max = 200;
-        return line.Length <= max ? line : string.Concat(line.AsSpan(0, max), "\u2026");
+        return $"exit {result.ExitCode}{FailureDetails(result)}";
     }
 
     private static Dictionary<string, string> NugetEnvironment(string packagesDir)

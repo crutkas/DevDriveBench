@@ -13,24 +13,21 @@ over the Dev Drive lane on a shared scale, labeled directly. No legends, no para
 
 ### Install a release
 
-Download the `.msixbundle` and `.cer` from the
+Download `install.ps1`, the `.msixbundle`, and the `.cer` into the same folder from the
 [latest release](https://github.com/crutkas/DevDriveBench/releases/latest).
 The bundle includes x64 and ARM64 builds and both the .NET and Windows App SDK runtimes.
 Windows 11 is required for Dev Drive benchmarks; Replay works without a Dev Drive.
 
+Run this in a normal PowerShell window in the download folder:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The script verifies the release checksums and signing certificate, requests elevation
+only to trust the certificate, and installs the app for the current user.
 Releases are self-signed, not signed by a publicly trusted certificate authority.
-Only trust the certificate if you trust this publisher. After checking its thumbprint
-against the release notes, open PowerShell **as administrator** in the download folder:
-
-```powershell
-Import-Certificate -FilePath .\DevDriveBench.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
-```
-
-Then double-click the `.msixbundle` to install, or run this in a normal PowerShell window:
-
-```powershell
-Add-AppxPackage .\DevDriveBench-1.0.0.msixbundle
-```
+Only approve the certificate trust if you trust this publisher.
 
 Launch **Dev Drive Bench** from Start. Live workloads need their developer tools
 (see below); the app's Install buttons can install them.

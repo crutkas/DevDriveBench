@@ -11,6 +11,32 @@ over the Dev Drive lane on a shared scale, labeled directly. No legends, no para
 
 ## Run it
 
+### Install a release
+
+Download the `.msixbundle` and `.cer` from the
+[latest release](https://github.com/crutkas/DevDriveBench/releases/latest).
+The bundle includes x64 and ARM64 builds and both the .NET and Windows App SDK runtimes.
+Windows 11 is required for Dev Drive benchmarks; Replay works without a Dev Drive.
+
+Releases are self-signed, not signed by a publicly trusted certificate authority.
+Only trust the certificate if you trust this publisher. After checking its thumbprint
+against the release notes, open PowerShell **as administrator** in the download folder:
+
+```powershell
+Import-Certificate -FilePath .\DevDriveBench.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+```
+
+Then double-click the `.msixbundle` to install, or run this in a normal PowerShell window:
+
+```powershell
+Add-AppxPackage .\DevDriveBench-1.0.0.msixbundle
+```
+
+Launch **Dev Drive Bench** from Start. Live workloads need their developer tools
+(see below); the app's Install buttons can install them.
+
+### Build from source
+
 Requirements: Windows 11 with a Dev Drive, .NET 10 SDK, [WinApp CLI](https://github.com/microsoft/winappcli) 0.7+, Developer Mode.
 
 ```powershell
